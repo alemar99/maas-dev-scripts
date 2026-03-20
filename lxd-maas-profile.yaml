@@ -1,0 +1,14 @@
+config:
+    raw.idmap: both 1000 1000
+    security.nesting: true
+    user.vendor-data: |
+        #cloud-config
+        packages:
+        - git 
+        - build-essential
+        - jq
+devices:
+    work:
+        type: disk
+        source: /home/alemar/work
+        path: /work

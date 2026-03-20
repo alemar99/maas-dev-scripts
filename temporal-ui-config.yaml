@@ -1,0 +1,17 @@
+temporalGrpcAddress: IP_REPLACE:5271
+port: 8080
+enableUi: true
+cors:
+  cookieInsecure: true
+  allowOrigins:
+    - http://IP_REPLACE:8080
+codec:
+  endpoint: http://IP_REPLACE:8090
+defaultNamespace: default
+
+tls:
+  caFile: /var/snap/temporal-ui/common/maas-certificates/cacerts.pem
+  certFile: /var/snap/temporal-ui/common/maas-certificates/cluster.pem
+  keyFile: /var/snap/temporal-ui/common/maas-certificates/cluster.key
+  serverName: maas
+
