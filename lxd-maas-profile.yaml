@@ -1,5 +1,4 @@
 config:
-    raw.idmap: both 1000 1000
     security.nesting: true
     user.vendor-data: |
         #cloud-config
@@ -7,8 +6,9 @@ config:
         - git 
         - build-essential
         - jq
+        - pgcli
 devices:
-    work:
+    scripts:
         type: disk
-        source: /home/alemar/work
-        path: /work
+        source: /home/alessandro.marcolini@canonical.com/dev/maas-dev-scripts
+        path: /scripts
