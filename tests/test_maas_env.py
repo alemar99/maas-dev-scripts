@@ -20,5 +20,18 @@ class TestComputeContainers(unittest.TestCase):
         )
 
 
+class TestNormalizeSource(unittest.TestCase):
+    def test_adds_single_trailing_slash(self):
+        self.assertEqual(maas_env.normalize_source("/tmp/foo"), "/tmp/foo/")
+
+    def test_collapses_existing_trailing_slash(self):
+        self.assertEqual(maas_env.normalize_source("/tmp/foo/"), "/tmp/foo/")
+
+    def test_expands_user(self):
+        result = maas_env.normalize_source("~/foo")
+        self.assertTrue(result.startswith(os.path.expanduser("~")))
+        self.assertTrue(result.endswith("/foo/"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,12 @@ def compute_containers(name: str, mode: str) -> list[str]:
     return [f"{name}-{i}" for i in (1, 2, 3)]
 
 
+def normalize_source(path: str) -> str:
+    """Expand ~ and ensure exactly one trailing slash (rsync 'contents of')."""
+    expanded = os.path.expanduser(path)
+    return expanded.rstrip("/") + "/"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
