@@ -46,6 +46,13 @@ def parse_script_arg(raw: str) -> ScriptTarget:
     return ScriptTarget(path=path, target=target)
 
 
+def compute_containers(name: str, mode: str) -> list[str]:
+    """Return the container names for a given base name and mode."""
+    if mode == "single":
+        return [name]
+    return [f"{name}-{i}" for i in (1, 2, 3)]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
