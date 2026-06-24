@@ -221,10 +221,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sync a host MAAS repo (e.g. ~/work/maas) into each container's "
         "codebase dir, then exit. Mutually exclusive with --destroy.",
     )
+    action.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Overlay-mount /work/src/* onto the MAAS snap paths in each "
+        "container, then restart MAAS. Requires --overlay-config.",
+    )
+    action.add_argument(
+        "--unoverlay",
+        action="store_true",
+        help="Remove the overlay mounts in each container, then restart MAAS. "
+        "Requires --overlay-config.",
+    )
     parser.add_argument(
         "--sync-dest",
         default="/work",
         help="Destination dir inside each container for --sync (default: /work)",
+    )
+    parser.add_argument(
+        "--overlay-config",
+        metavar="PATH",
+        default=None,
+        help="Path to the overlay config (e.g. overlay-config-37.yaml). Must "
+        "live inside this repo. Required for --overlay/--unoverlay.",
     )
     parser.add_argument(
         "--dry-run",
@@ -239,6 +258,10 @@ DRY_RUN = False
 # Paths excluded from --sync. With --delete, excluded paths are preserved in
 # the container (not deleted), so each container's own .git survives.
 EXCLUDES = [".git", "__pycache__", "*.pyc", ".overlayfs_workdir"]
+
+# In-container path to the vendored overlay-mount tool. The repo is bind-mounted
+# at /scripts in every container (see lxd-maas-profile.yaml).
+OVERLAY_SCRIPT = "/scripts/overlay-mount.py"
 
 
 def _echo_dry(cmd_args: list[str]) -> None:
@@ -591,6 +614,59 @@ def sync(
     log.info("=== Sync complete ===")
 
 
+def overlay(
+    containers: list[str],
+    subcommand: str,
+    config: str,
+) -> None:
+    """Run the overlay tool (sync/unsync) in each container, then restart MAAS."""
+    verb = "Overlaying" if subcommand == "sync" else "Removing overlays from"
+    log.info(
+        "=== %s %d container(s) (config %s) ===",
+        verb,
+        len(containers),
+        config,
+    )
+    cmd = build_overlay_command("python3", OVERLAY_SCRIPT, subcommand, config)
+    failures: list[str] = []
+
+    for c in containers:
+        if not DRY_RUN and not is_container_running(c):
+            log.warning("  [overlay] %s is missing or not running — skipping", c)
+            failures.append(c)
+            continue
+
+        result = lxc_exec(c, cmd, check=False)
+        if not DRY_RUN and result.returncode != 0:
+            log.warning(
+                "  [overlay] %s failed on %s (exit code %d)",
+                subcommand,
+                c,
+                result.returncode,
+            )
+            failures.append(c)
+            continue
+
+        restart = lxc_exec(c, "sudo snap restart maas", check=False)
+        if not DRY_RUN and restart.returncode != 0:
+            log.warning(
+                "  [overlay] snap restart failed on %s (exit code %d)",
+                c,
+                restart.returncode,
+            )
+            failures.append(c)
+            continue
+
+        log.info("  [overlay] %s done", c)
+
+    if failures:
+        log.error(
+            "=== Overlay finished with failures: %s ===", ", ".join(failures)
+        )
+        sys.exit(1)
+    log.info("=== Overlay complete ===")
+
+
 def main() -> None:
     global DRY_RUN
 
@@ -626,6 +702,28 @@ def main() -> None:
             )
             sys.exit(1)
         sync(containers, source, args.sync_dest)
+    elif args.overlay or args.unoverlay:
+        if not args.overlay_config or not args.overlay_config.strip():
+            log.error("ERROR: --overlay/--unoverlay require --overlay-config")
+            sys.exit(1)
+        host_config = os.path.expanduser(args.overlay_config)
+        if not os.path.isfile(host_config):
+            log.error(
+                "ERROR: overlay config not found or not a file: %s",
+                args.overlay_config,
+            )
+            sys.exit(1)
+        repo_root = str(Path(__file__).resolve().parent)
+        try:
+            config_in_container = container_config_path(host_config, repo_root)
+        except ValueError as exc:
+            log.error("ERROR: %s", exc)
+            sys.exit(1)
+        overlay(
+            containers,
+            "sync" if args.overlay else "unsync",
+            config_in_container,
+        )
     else:
         create(
             name=args.name,
