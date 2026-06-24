@@ -41,5 +41,33 @@ class TestBuildRshValue(unittest.TestCase):
         )
 
 
+class TestBuildRsyncCommand(unittest.TestCase):
+    def test_builds_expected_argv(self):
+        cmd = maas_env.build_rsync_command(
+            "/src/",
+            "c1",
+            "/work",
+            "PYBIN /x/maas-env.py --rsh-shim",
+            [".git", "__pycache__", "*.pyc"],
+        )
+        self.assertEqual(cmd[0], "rsync")
+        self.assertIn("-a", cmd)
+        self.assertIn("--no-owner", cmd)
+        self.assertIn("--no-group", cmd)
+        self.assertIn("--delete", cmd)
+        self.assertEqual(cmd.count("--exclude"), 3)
+        self.assertIn(".git", cmd)
+        self.assertIn("__pycache__", cmd)
+        self.assertIn("*.pyc", cmd)
+        e_idx = cmd.index("-e")
+        self.assertEqual(cmd[e_idx + 1], "PYBIN /x/maas-env.py --rsh-shim")
+        self.assertEqual(cmd[-2], "/src/")
+        self.assertEqual(cmd[-1], "c1:/work/")
+
+    def test_dest_trailing_slash_is_normalized(self):
+        cmd = maas_env.build_rsync_command("/src/", "c1", "/work/", "RSH", [])
+        self.assertEqual(cmd[-1], "c1:/work/")
+
+
 if __name__ == "__main__":
     unittest.main()

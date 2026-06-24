@@ -64,6 +64,23 @@ def build_rsh_value(python: str, script: str) -> str:
     return f"{python} {script} --rsh-shim"
 
 
+def build_rsync_command(
+    source: str,
+    container: str,
+    dest: str,
+    rsh: str,
+    excludes: list[str],
+) -> list[str]:
+    """Build the host-side rsync argv that syncs into a container via the shim."""
+    cmd = ["rsync", "-a", "--no-owner", "--no-group", "--delete"]
+    for pattern in excludes:
+        cmd += ["--exclude", pattern]
+    cmd += ["-e", rsh]
+    dest_spec = f"{container}:{dest.rstrip('/')}/"
+    cmd += [source, dest_spec]
+    return cmd
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
