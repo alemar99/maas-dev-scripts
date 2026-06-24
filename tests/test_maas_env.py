@@ -111,5 +111,33 @@ class TestSourceResolvesToRoot(unittest.TestCase):
         self.assertFalse(maas_env.source_resolves_to_root("."))
 
 
+class TestContainerConfigPath(unittest.TestCase):
+    def test_maps_repo_root_config(self):
+        self.assertEqual(
+            maas_env.container_config_path(
+                "/repo/overlay-config-37.yaml", "/repo"
+            ),
+            "/scripts/overlay-config-37.yaml",
+        )
+
+    def test_maps_nested_config(self):
+        self.assertEqual(
+            maas_env.container_config_path("/repo/configs/x.yaml", "/repo"),
+            "/scripts/configs/x.yaml",
+        )
+
+    def test_rejects_config_outside_repo(self):
+        with self.assertRaises(ValueError):
+            maas_env.container_config_path("/etc/x.yaml", "/repo")
+
+    def test_respects_custom_mount(self):
+        self.assertEqual(
+            maas_env.container_config_path(
+                "/repo/c.yaml", "/repo", mount="/mnt/repo"
+            ),
+            "/mnt/repo/c.yaml",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

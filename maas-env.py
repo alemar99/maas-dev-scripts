@@ -125,6 +125,25 @@ def is_container_running(container: str) -> bool:
     return parse_container_running(result.stdout)
 
 
+def container_config_path(
+    host_config: str, repo_root: str, mount: str = "/scripts"
+) -> str:
+    """Map a host overlay-config path to its path inside a container.
+
+    The repo is bind-mounted at `mount` (default /scripts) in every container, so
+    the config must live inside `repo_root`. Returns `<mount>/<relpath>`. Raises
+    ValueError if the config is outside the repo.
+    """
+    abs_config = os.path.abspath(os.path.expanduser(host_config))
+    abs_root = os.path.abspath(os.path.expanduser(repo_root))
+    rel = os.path.relpath(abs_config, abs_root)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError(
+            f"overlay config must live inside the repo ({abs_root}): {host_config}"
+        )
+    return f"{mount}/{rel}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
