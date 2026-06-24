@@ -81,6 +81,20 @@ def build_rsync_command(
     return cmd
 
 
+def build_shim_exec_argv(shim_args: list[str]) -> list[str]:
+    """Translate rsync's '<container> <remote-cmd...>' into an lxc exec argv.
+
+    Runs the container-side command as uid/gid 1000 (ubuntu) so synced files
+    keep the ownership maas-install.sh sets on /work.
+    """
+    container = shim_args[0]
+    remote_cmd = shim_args[1:]
+    return [
+        "lxc", "exec", "--user", "1000", "--group", "1000",
+        container, "--", *remote_cmd,
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",

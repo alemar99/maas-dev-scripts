@@ -69,5 +69,16 @@ class TestBuildRsyncCommand(unittest.TestCase):
         self.assertEqual(cmd[-1], "c1:/work/")
 
 
+class TestBuildShimExecArgv(unittest.TestCase):
+    def test_builds_lxc_exec_argv(self):
+        self.assertEqual(
+            maas_env.build_shim_exec_argv(["c1", "rsync", "--server", "x"]),
+            [
+                "lxc", "exec", "--user", "1000", "--group", "1000",
+                "c1", "--", "rsync", "--server", "x",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
