@@ -528,8 +528,12 @@ def sync(
         cmd = build_rsync_command(source, c, dest, rsh, EXCLUDES)
         result = run(cmd, check=False)
         if not DRY_RUN and result.returncode != 0:
+            detail = result.stderr.strip()
             log.warning(
-                "  [sync] rsync to %s failed (exit code %d)", c, result.returncode
+                "  [sync] rsync to %s failed (exit code %d)%s",
+                c,
+                result.returncode,
+                f": {detail}" if detail else "",
             )
             failures.append(c)
         else:
@@ -564,6 +568,9 @@ def main() -> None:
             log.error("ERROR: --sync and --sync-dest must be non-empty paths")
             sys.exit(1)
         source = normalize_source(args.sync)
+        if source == "/":
+            log.error("ERROR: refusing to sync from filesystem root '/'")
+            sys.exit(1)
         if not os.path.isdir(source):
             log.error(
                 "ERROR: sync source not found or not a directory: %s", args.sync
