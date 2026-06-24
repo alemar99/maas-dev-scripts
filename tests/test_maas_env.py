@@ -139,5 +139,31 @@ class TestContainerConfigPath(unittest.TestCase):
         )
 
 
+class TestBuildOverlayCommand(unittest.TestCase):
+    def test_sync_command(self):
+        self.assertEqual(
+            maas_env.build_overlay_command(
+                "python3",
+                "/scripts/overlay-mount.py",
+                "sync",
+                "/scripts/overlay-config-37.yaml",
+            ),
+            "cd /work && python3 /scripts/overlay-mount.py sync "
+            "--config /scripts/overlay-config-37.yaml --snap",
+        )
+
+    def test_unsync_command(self):
+        self.assertEqual(
+            maas_env.build_overlay_command(
+                "python3",
+                "/scripts/overlay-mount.py",
+                "unsync",
+                "/scripts/overlay-config-master.yaml",
+            ),
+            "cd /work && python3 /scripts/overlay-mount.py unsync "
+            "--config /scripts/overlay-config-master.yaml --snap",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

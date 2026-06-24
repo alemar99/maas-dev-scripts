@@ -144,6 +144,24 @@ def container_config_path(
     return f"{mount}/{rel}"
 
 
+def build_overlay_command(
+    python: str,
+    script: str,
+    subcommand: str,
+    config: str,
+    workdir: str = "/work",
+) -> str:
+    """Build the in-container shell command that runs the overlay tool.
+
+    Runs from `workdir` (must be on the container rootfs) so the tool's relative
+    `.overlayfs_workdir` shares a filesystem with the `/work/src/...` upperdirs.
+    """
+    return (
+        f"cd {workdir} && {python} {script} {subcommand} "
+        f"--config {config} --snap"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
