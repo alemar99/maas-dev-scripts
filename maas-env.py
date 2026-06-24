@@ -162,10 +162,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Script to run after MAAS init. Repeatable. "
         "Format: path:all|node1|node2|node3",
     )
-    parser.add_argument(
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
         "--destroy",
         action="store_true",
         help="Destroy containers and network instead of creating",
+    )
+    action.add_argument(
+        "--sync",
+        metavar="PATH",
+        default=None,
+        help="Sync a host MAAS repo (e.g. ~/work/maas) into each container's "
+        "codebase dir, then exit. Mutually exclusive with --destroy.",
+    )
+    parser.add_argument(
+        "--sync-dest",
+        default="/work",
+        help="Destination dir inside each container for --sync (default: /work)",
     )
     parser.add_argument(
         "--dry-run",
@@ -176,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 DRY_RUN = False
+
+# Paths excluded from --sync. With --delete, excluded paths are preserved in
+# the container (not deleted), so each container's own .git survives.
+EXCLUDES = [".git", "__pycache__", "*.pyc"]
 
 
 def _echo_dry(cmd_args: list[str]) -> None:
@@ -487,20 +504,72 @@ def destroy(name: str, mode: str, containers: list[str]) -> None:
     log.info("=== MAAS environment '%s' destroyed ===", name)
 
 
+def sync(
+    containers: list[str],
+    source: str,
+    dest: str,
+) -> None:
+    """Rsync a host source dir into each container's dest dir via the shim."""
+    log.info(
+        "=== Syncing %s -> %d container(s) at %s ===",
+        source,
+        len(containers),
+        dest,
+    )
+    rsh = build_rsh_value(sys.executable, str(Path(__file__).resolve()))
+    failures: list[str] = []
+
+    for c in containers:
+        if not DRY_RUN and not is_container_running(c):
+            log.warning("  [sync] %s is missing or not running — skipping", c)
+            failures.append(c)
+            continue
+
+        cmd = build_rsync_command(source, c, dest, rsh, EXCLUDES)
+        result = run(cmd, check=False)
+        if not DRY_RUN and result.returncode != 0:
+            log.warning(
+                "  [sync] rsync to %s failed (exit code %d)", c, result.returncode
+            )
+            failures.append(c)
+        else:
+            log.info("  [sync] %s done", c)
+
+    if failures:
+        log.error("=== Sync finished with failures: %s ===", ", ".join(failures))
+        sys.exit(1)
+    log.info("=== Sync complete ===")
+
+
 def main() -> None:
     global DRY_RUN
+
+    # rsync transport shim: when invoked as the rsync --rsh, re-exec into
+    # `lxc exec`. This must run before argparse, which would reject these args.
+    if len(sys.argv) >= 2 and sys.argv[1] == "--rsh-shim":
+        argv = build_shim_exec_argv(sys.argv[2:])
+        os.execvp(argv[0], argv)
+        return  # unreachable: execvp replaces the process image
+
     parser = build_parser()
     args = parser.parse_args()
     DRY_RUN = args.dry_run
 
-    containers = (
-        [args.name]
-        if args.mode == "single"
-        else [f"{args.name}-{i}" for i in (1, 2, 3)]
-    )
+    containers = compute_containers(args.name, args.mode)
 
     if args.destroy:
         destroy(args.name, args.mode, containers)
+    elif args.sync is not None:
+        if not args.sync.strip() or not args.sync_dest.strip():
+            log.error("ERROR: --sync and --sync-dest must be non-empty paths")
+            sys.exit(1)
+        source = normalize_source(args.sync)
+        if not os.path.isdir(source):
+            log.error(
+                "ERROR: sync source not found or not a directory: %s", args.sync
+            )
+            sys.exit(1)
+        sync(containers, source, args.sync_dest)
     else:
         create(
             name=args.name,
