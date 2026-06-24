@@ -8,6 +8,7 @@ config:
         - jq
         - pgcli
         - rsync
+        - python3-yaml
 devices:
     scripts:
         type: disk
