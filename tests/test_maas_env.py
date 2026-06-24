@@ -80,5 +80,23 @@ class TestBuildShimExecArgv(unittest.TestCase):
         )
 
 
+class TestParseContainerRunning(unittest.TestCase):
+    def test_running(self):
+        self.assertTrue(
+            maas_env.parse_container_running("Name: c1\nStatus: RUNNING\n")
+        )
+
+    def test_stopped(self):
+        self.assertFalse(
+            maas_env.parse_container_running("Name: c1\nStatus: STOPPED\n")
+        )
+
+    def test_case_insensitive(self):
+        self.assertTrue(maas_env.parse_container_running("Status: Running"))
+
+    def test_no_status_line(self):
+        self.assertFalse(maas_env.parse_container_running("Name: c1\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

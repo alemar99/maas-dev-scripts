@@ -95,6 +95,27 @@ def build_shim_exec_argv(shim_args: list[str]) -> list[str]:
     ]
 
 
+def parse_container_running(lxc_info_stdout: str) -> bool:
+    """Return True if `lxc info` output reports the container as RUNNING."""
+    for line in lxc_info_stdout.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("status:"):
+            return "running" in stripped.lower()
+    return False
+
+
+def is_container_running(container: str) -> bool:
+    """Check whether a container exists and is running (via `lxc info`)."""
+    result = subprocess.run(
+        ["lxc", "info", container],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return False
+    return parse_container_running(result.stdout)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
