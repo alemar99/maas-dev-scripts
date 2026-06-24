@@ -165,5 +165,14 @@ class TestBuildOverlayCommand(unittest.TestCase):
         )
 
 
+class TestExcludes(unittest.TestCase):
+    def test_excludes_overlayfs_workdir(self):
+        self.assertIn(".overlayfs_workdir", maas_env.EXCLUDES)
+
+    def test_keeps_sync_excludes(self):
+        for pattern in (".git", "__pycache__", "*.pyc"):
+            self.assertIn(pattern, maas_env.EXCLUDES)
+
+
 if __name__ == "__main__":
     unittest.main()

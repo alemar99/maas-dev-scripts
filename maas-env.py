@@ -238,7 +238,7 @@ DRY_RUN = False
 
 # Paths excluded from --sync. With --delete, excluded paths are preserved in
 # the container (not deleted), so each container's own .git survives.
-EXCLUDES = [".git", "__pycache__", "*.pyc"]
+EXCLUDES = [".git", "__pycache__", "*.pyc", ".overlayfs_workdir"]
 
 
 def _echo_dry(cmd_args: list[str]) -> None:
