@@ -33,5 +33,13 @@ class TestNormalizeSource(unittest.TestCase):
         self.assertTrue(result.endswith("/foo/"))
 
 
+class TestBuildRshValue(unittest.TestCase):
+    def test_builds_rsh_string(self):
+        self.assertEqual(
+            maas_env.build_rsh_value("/usr/bin/python3", "/x/maas-env.py"),
+            "/usr/bin/python3 /x/maas-env.py --rsh-shim",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

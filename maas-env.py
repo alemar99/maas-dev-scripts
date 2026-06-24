@@ -59,6 +59,11 @@ def normalize_source(path: str) -> str:
     return expanded.rstrip("/") + "/"
 
 
+def build_rsh_value(python: str, script: str) -> str:
+    """Build the rsync --rsh transport string that re-invokes this script."""
+    return f"{python} {script} --rsh-shim"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create/destroy MAAS test environments in LXD",
