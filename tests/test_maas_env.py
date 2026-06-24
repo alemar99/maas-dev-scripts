@@ -98,5 +98,18 @@ class TestParseContainerRunning(unittest.TestCase):
         self.assertFalse(maas_env.parse_container_running("Name: c1\n"))
 
 
+class TestSourceResolvesToRoot(unittest.TestCase):
+    def test_literal_root(self):
+        self.assertTrue(maas_env.source_resolves_to_root("/"))
+
+    def test_dot_and_dotdot_paths_resolve_to_root(self):
+        for raw in ("/.", "/..", "/home/.."):
+            self.assertTrue(maas_env.source_resolves_to_root(raw), msg=raw)
+
+    def test_normal_directory_is_not_root(self):
+        self.assertFalse(maas_env.source_resolves_to_root("/tmp"))
+        self.assertFalse(maas_env.source_resolves_to_root("."))
+
+
 if __name__ == "__main__":
     unittest.main()

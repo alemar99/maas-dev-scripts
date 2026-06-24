@@ -59,6 +59,15 @@ def normalize_source(path: str) -> str:
     return expanded.rstrip("/") + "/"
 
 
+def source_resolves_to_root(path: str) -> bool:
+    """True if path (after ~ expansion) resolves to filesystem root '/'.
+
+    Catches '/', '/.', '/..', '/home/..', and symlinks to '/', any of which
+    would make `rsync -a --delete` mirror the entire host root filesystem.
+    """
+    return os.path.realpath(os.path.expanduser(path)) == "/"
+
+
 def build_rsh_value(python: str, script: str) -> str:
     """Build the rsync --rsh transport string that re-invokes this script."""
     return f"{python} {script} --rsh-shim"
@@ -567,10 +576,13 @@ def main() -> None:
         if not args.sync.strip() or not args.sync_dest.strip():
             log.error("ERROR: --sync and --sync-dest must be non-empty paths")
             sys.exit(1)
-        source = normalize_source(args.sync)
-        if source == "/":
+        if source_resolves_to_root(args.sync):
             log.error("ERROR: refusing to sync from filesystem root '/'")
             sys.exit(1)
+        if os.path.normpath(args.sync_dest) == "/":
+            log.error("ERROR: refusing to sync into container root '/'")
+            sys.exit(1)
+        source = normalize_source(args.sync)
         if not os.path.isdir(source):
             log.error(
                 "ERROR: sync source not found or not a directory: %s", args.sync
