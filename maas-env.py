@@ -554,6 +554,11 @@ def run_scripts(
                 raise
 
 
+def node_ip(container: str) -> str:
+    """Return the container's primary IP address."""
+    return lxc_exec_capture(container, "hostname -I | cut -d' ' -f1")
+
+
 def setup_postgres(container: str) -> str:
     """Install and configure PostgreSQL on a container. Return its IP."""
     log.info("[postgres] Installing PostgreSQL on %s", container)
@@ -604,6 +609,9 @@ def create(
     pre_scripts: list[ScriptTarget],
     post_scripts: list[ScriptTarget],
     maas_channel: str,
+    deb: bool = False,
+    ppa: str | None = None,
+    branch: str | None = None,
 ) -> None:
     network = f"{name}-net" if mode == "multi" else None
 
@@ -632,16 +640,22 @@ def create(
 
     run_scripts(containers, pre_scripts, "pre-install", abort_on_failure=True)
 
-    db_ip = setup_postgres(containers[0])
+    if deb:
+        # The deb package provisions its own local PostgreSQL; no separate DB.
+        install_maas(containers, "deb", ppa=ppa, branch=branch)
+        maas_ip = node_ip(containers[0])
+    else:
+        db_ip = setup_postgres(containers[0])
+        install_maas(containers, "snap", db_ip=db_ip, channel=maas_channel)
+        maas_ip = db_ip
 
-    install_maas(containers, "snap", db_ip=db_ip, channel=maas_channel)
     create_admin(containers[0])
 
     run_scripts(containers, post_scripts, "post-install", abort_on_failure=False)
 
     log.info("=== MAAS environment '%s' ready ===", name)
     log.info("  Containers: %s", ", ".join(containers))
-    log.info("  MAAS URL:   http://%s:5240/MAAS", db_ip)
+    log.info("  MAAS URL:   http://%s:5240/MAAS", maas_ip)
     log.info("  Admin:      maas / maas")
 
 
