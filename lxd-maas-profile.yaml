@@ -9,6 +9,7 @@ config:
         - pgcli
         - rsync
         - python3-yaml
+        - software-properties-common
 devices:
     scripts:
         type: disk
