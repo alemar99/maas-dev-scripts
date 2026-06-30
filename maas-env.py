@@ -563,11 +563,22 @@ def setup_postgres(container: str) -> str:
     return db_ip
 
 
-def install_maas(containers: list[str], db_ip: str, maas_channel: str) -> None:
-    """Install MAAS snap, connect interfaces, and init region+rack on all containers."""
-    log.info("[snap] Installing and initializing MAAS on all nodes")
+def install_maas(
+    containers: list[str],
+    method: str,
+    *,
+    db_ip: str | None = None,
+    channel: str | None = None,
+    ppa: str | None = None,
+    branch: str | None = None,
+) -> None:
+    """Install MAAS on all nodes via maas-install.sh for the given method."""
+    log.info("[%s] Installing and initializing MAAS on all nodes", method)
+    cmd = build_install_invocation(
+        method, db_ip=db_ip, channel=channel, ppa=ppa, branch=branch
+    )
     for c in containers:
-        lxc_exec(c, f"/scripts/maas-install.sh {db_ip} {maas_channel}")
+        lxc_exec(c, cmd)
 
 
 def create_admin(container: str) -> None:
@@ -623,7 +634,7 @@ def create(
 
     db_ip = setup_postgres(containers[0])
 
-    install_maas(containers, db_ip, maas_channel)
+    install_maas(containers, "snap", db_ip=db_ip, channel=maas_channel)
     create_admin(containers[0])
 
     run_scripts(containers, post_scripts, "post-install", abort_on_failure=False)
