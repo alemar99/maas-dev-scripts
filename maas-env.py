@@ -182,6 +182,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="MAAS snap channel to install (default: latest/edge)",
     )
     parser.add_argument(
+        "--deb",
+        action="store_true",
+        help="Install MAAS from a deb/PPA instead of the snap. Single mode "
+        "only; requires --ppa and --branch.",
+    )
+    parser.add_argument(
+        "--ppa",
+        default=None,
+        help="PPA to install the MAAS deb from (e.g. ppa:maas/3.7). "
+        "Required with --deb.",
+    )
+    parser.add_argument(
+        "--branch",
+        default=None,
+        help="MAAS git branch cloned into /work for the deb path. "
+        "Required with --deb.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["single", "multi"],
         default="single",

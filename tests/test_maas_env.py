@@ -286,5 +286,23 @@ class TestValidateDebCreateArgs(unittest.TestCase):
         )
 
 
+class TestBuildParserDebArgs(unittest.TestCase):
+    def test_deb_args_parse(self):
+        parser = maas_env.build_parser()
+        args = parser.parse_args(
+            ["--name", "dev", "--deb", "--ppa", "ppa:maas/3.7", "--branch", "3.7"]
+        )
+        self.assertTrue(args.deb)
+        self.assertEqual(args.ppa, "ppa:maas/3.7")
+        self.assertEqual(args.branch, "3.7")
+
+    def test_deb_defaults_off(self):
+        parser = maas_env.build_parser()
+        args = parser.parse_args(["--name", "dev"])
+        self.assertFalse(args.deb)
+        self.assertIsNone(args.ppa)
+        self.assertIsNone(args.branch)
+
+
 if __name__ == "__main__":
     unittest.main()
