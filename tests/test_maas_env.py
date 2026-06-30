@@ -174,5 +174,27 @@ class TestExcludes(unittest.TestCase):
             self.assertIn(pattern, maas_env.EXCLUDES)
 
 
+class TestBuildInstallInvocation(unittest.TestCase):
+    def test_snap_form(self):
+        self.assertEqual(
+            maas_env.build_install_invocation(
+                "snap", db_ip="10.0.0.5", channel="3.7/edge"
+            ),
+            "/scripts/maas-install.sh snap 10.0.0.5 3.7/edge",
+        )
+
+    def test_deb_form(self):
+        self.assertEqual(
+            maas_env.build_install_invocation(
+                "deb", ppa="ppa:maas/3.7", branch="3.7"
+            ),
+            "/scripts/maas-install.sh deb ppa:maas/3.7 3.7",
+        )
+
+    def test_unknown_method_raises(self):
+        with self.assertRaises(ValueError):
+            maas_env.build_install_invocation("flatpak")
+
+
 if __name__ == "__main__":
     unittest.main()

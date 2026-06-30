@@ -263,6 +263,30 @@ EXCLUDES = [".git", "__pycache__", "*.pyc", ".overlayfs_workdir"]
 # at /scripts in every container (see lxd-maas-profile.yaml).
 OVERLAY_SCRIPT = "/scripts/overlay-mount.py"
 
+# In-container path to the install script (bind-mounted at /scripts).
+INSTALL_SCRIPT = "/scripts/maas-install.sh"
+
+
+def build_install_invocation(
+    method: str,
+    *,
+    db_ip: str | None = None,
+    channel: str | None = None,
+    ppa: str | None = None,
+    branch: str | None = None,
+    script: str = INSTALL_SCRIPT,
+) -> str:
+    """Build the in-container command that runs maas-install.sh for a method.
+
+    snap: '<script> snap <db_ip> <channel>'
+    deb:  '<script> deb <ppa> <branch>'
+    """
+    if method == "snap":
+        return f"{script} snap {db_ip} {channel}"
+    if method == "deb":
+        return f"{script} deb {ppa} {branch}"
+    raise ValueError(f"unknown install method: {method}")
+
 
 def _echo_dry(cmd_args: list[str]) -> None:
     log.info("[dry-run] %s", " ".join(cmd_args))
