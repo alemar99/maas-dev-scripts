@@ -717,6 +717,7 @@ def overlay(
     containers: list[str],
     subcommand: str,
     config: str,
+    method: str = "snap",
 ) -> None:
     """Run the overlay tool (sync/unsync) in each container, then restart MAAS."""
     verb = "Overlaying" if subcommand == "sync" else "Removing overlays from"
@@ -726,7 +727,9 @@ def overlay(
         len(containers),
         config,
     )
-    cmd = build_overlay_command("python3", OVERLAY_SCRIPT, subcommand, config)
+    cmd = build_overlay_command(
+        "python3", OVERLAY_SCRIPT, subcommand, config, method
+    )
     failures: list[str] = []
 
     for c in containers:
@@ -746,10 +749,10 @@ def overlay(
             failures.append(c)
             continue
 
-        restart = lxc_exec(c, "sudo snap restart maas", check=False)
+        restart = lxc_exec(c, build_restart_command(method), check=False)
         if not DRY_RUN and restart.returncode != 0:
             log.warning(
-                "  [overlay] snap restart failed on %s (exit code %d)",
+                "  [overlay] MAAS restart failed on %s (exit code %d)",
                 c,
                 restart.returncode,
             )
@@ -779,6 +782,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     DRY_RUN = args.dry_run
+
+    flag_err = validate_deb_flags(args.deb, args.ppa, args.branch)
+    if flag_err:
+        log.error("ERROR: %s", flag_err)
+        sys.exit(1)
 
     containers = compute_containers(args.name, args.mode)
 
@@ -822,8 +830,15 @@ def main() -> None:
             containers,
             "sync" if args.overlay else "unsync",
             config_in_container,
+            "deb" if args.deb else "snap",
         )
     else:
+        create_err = validate_deb_create_args(
+            args.deb, args.mode, args.ppa, args.branch
+        )
+        if create_err:
+            log.error("ERROR: %s", create_err)
+            sys.exit(1)
         create(
             name=args.name,
             mode=args.mode,
@@ -833,6 +848,9 @@ def main() -> None:
             pre_scripts=args.pre,
             post_scripts=args.post,
             maas_channel=args.maas_channel,
+            deb=args.deb,
+            ppa=args.ppa,
+            branch=args.branch,
         )
 
 
