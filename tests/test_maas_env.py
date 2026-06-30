@@ -140,28 +140,67 @@ class TestContainerConfigPath(unittest.TestCase):
 
 
 class TestBuildOverlayCommand(unittest.TestCase):
-    def test_sync_command(self):
+    def test_sync_command_snap(self):
         self.assertEqual(
             maas_env.build_overlay_command(
                 "python3",
                 "/scripts/overlay-mount.py",
                 "sync",
                 "/scripts/overlay-config-37.yaml",
+                "snap",
             ),
             "cd /work && python3 /scripts/overlay-mount.py sync "
             "--config /scripts/overlay-config-37.yaml --snap",
         )
 
-    def test_unsync_command(self):
+    def test_unsync_command_snap(self):
         self.assertEqual(
             maas_env.build_overlay_command(
                 "python3",
                 "/scripts/overlay-mount.py",
                 "unsync",
                 "/scripts/overlay-config-master.yaml",
+                "snap",
             ),
             "cd /work && python3 /scripts/overlay-mount.py unsync "
             "--config /scripts/overlay-config-master.yaml --snap",
+        )
+
+    def test_sync_command_deb(self):
+        self.assertEqual(
+            maas_env.build_overlay_command(
+                "python3",
+                "/scripts/overlay-mount.py",
+                "sync",
+                "/scripts/overlay-config-37.yaml",
+                "deb",
+            ),
+            "cd /work && python3 /scripts/overlay-mount.py sync "
+            "--config /scripts/overlay-config-37.yaml --deb",
+        )
+
+    def test_defaults_to_snap(self):
+        cmd = maas_env.build_overlay_command(
+            "python3", "/scripts/overlay-mount.py", "sync", "/cfg.yaml"
+        )
+        self.assertTrue(cmd.endswith("--snap"))
+
+
+class TestBuildRestartCommand(unittest.TestCase):
+    def test_snap(self):
+        self.assertEqual(
+            maas_env.build_restart_command("snap"), "sudo snap restart maas"
+        )
+
+    def test_deb(self):
+        self.assertEqual(
+            maas_env.build_restart_command("deb"),
+            "sudo systemctl restart 'maas-*'",
+        )
+
+    def test_unknown_defaults_to_snap(self):
+        self.assertEqual(
+            maas_env.build_restart_command("other"), "sudo snap restart maas"
         )
 
 

@@ -149,17 +149,27 @@ def build_overlay_command(
     script: str,
     subcommand: str,
     config: str,
+    method: str = "snap",
     workdir: str = "/work",
 ) -> str:
     """Build the in-container shell command that runs the overlay tool.
 
     Runs from `workdir` (must be on the container rootfs) so the tool's relative
     `.overlayfs_workdir` shares a filesystem with the `/work/src/...` upperdirs.
+    `method` selects the package section: '--snap' (default) or '--deb'.
     """
+    flag = "--deb" if method == "deb" else "--snap"
     return (
         f"cd {workdir} && {python} {script} {subcommand} "
-        f"--config {config} --snap"
+        f"--config {config} {flag}"
     )
+
+
+def build_restart_command(method: str) -> str:
+    """Command to restart MAAS after (un)overlaying, per install method."""
+    if method == "deb":
+        return "sudo systemctl restart 'maas-*'"
+    return "sudo snap restart maas"
 
 
 def build_parser() -> argparse.ArgumentParser:
