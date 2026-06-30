@@ -288,6 +288,28 @@ def build_install_invocation(
     raise ValueError(f"unknown install method: {method}")
 
 
+def validate_deb_flags(
+    deb: bool, ppa: str | None, branch: str | None
+) -> str | None:
+    """Global rule: --ppa/--branch are deb-only. Return an error message or None."""
+    if not deb and (ppa or branch):
+        return "--ppa/--branch require --deb"
+    return None
+
+
+def validate_deb_create_args(
+    deb: bool, mode: str, ppa: str | None, branch: str | None
+) -> str | None:
+    """Create-action rules for --deb. Return an error message or None."""
+    if not deb:
+        return None
+    if mode == "multi":
+        return "--deb is only supported with --mode single"
+    if not ppa or not branch:
+        return "--deb requires both --ppa and --branch"
+    return None
+
+
 def _echo_dry(cmd_args: list[str]) -> None:
     log.info("[dry-run] %s", " ".join(cmd_args))
 

@@ -196,5 +196,56 @@ class TestBuildInstallInvocation(unittest.TestCase):
             maas_env.build_install_invocation("flatpak")
 
 
+class TestValidateDebFlags(unittest.TestCase):
+    def test_ppa_without_deb_is_error(self):
+        self.assertIsNotNone(
+            maas_env.validate_deb_flags(False, "ppa:maas/3.7", None)
+        )
+
+    def test_branch_without_deb_is_error(self):
+        self.assertIsNotNone(
+            maas_env.validate_deb_flags(False, None, "3.7")
+        )
+
+    def test_neither_without_deb_is_ok(self):
+        self.assertIsNone(maas_env.validate_deb_flags(False, None, None))
+
+    def test_deb_alone_is_ok(self):
+        self.assertIsNone(maas_env.validate_deb_flags(True, None, None))
+
+
+class TestValidateDebCreateArgs(unittest.TestCase):
+    def test_deb_multi_is_error(self):
+        self.assertIsNotNone(
+            maas_env.validate_deb_create_args(
+                True, "multi", "ppa:maas/3.7", "3.7"
+            )
+        )
+
+    def test_deb_without_ppa_is_error(self):
+        self.assertIsNotNone(
+            maas_env.validate_deb_create_args(True, "single", None, "3.7")
+        )
+
+    def test_deb_without_branch_is_error(self):
+        self.assertIsNotNone(
+            maas_env.validate_deb_create_args(
+                True, "single", "ppa:maas/3.7", None
+            )
+        )
+
+    def test_valid_deb_args_ok(self):
+        self.assertIsNone(
+            maas_env.validate_deb_create_args(
+                True, "single", "ppa:maas/3.7", "3.7"
+            )
+        )
+
+    def test_plain_snap_ok(self):
+        self.assertIsNone(
+            maas_env.validate_deb_create_args(False, "multi", None, None)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
