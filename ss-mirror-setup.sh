@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Build a local simplestreams mirror
+# Build and serve a local simplestreams image mirror for MAAS.
+# Runs inside a container (via lxc exec).
+# Downloads daily amd64 images for jammy and noble, served via Apache on port 8001.
+set -e
 
 # =============== Download images
 sudo apt-get update

@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Base script to enable Candid or RBAC in MAAS.
+# Shared setup for Candid and RBAC integration with MAAS.
+# Runs inside a container (via lxc exec).
+# Sourced by candid_setup.sh and rbac_setup.sh; not intended to run standalone.
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -12,7 +15,6 @@ RBAC_URL="http://$HOST_IP:5000"
 
 # Candid + RBAC setup
 PGVER=$(ls -1 /etc/postgresql | tail -1)
-sudo ln -sf "$PGVER" /etc/postgresql/10
 sudo dpkg -i $SCRIPT_DIR/rbac_stable.deb
 
 # Update pg_hba.conf to allow candid/rbac access to maasdb

@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Enables TLS for maas. MAAS url is now https://MAAS_IP:5443
+# Enable TLS for MAAS snap; the MAAS URL becomes https://MAAS_IP:5443.
+# Runs inside a container (via lxc exec).
+# Generates a self-signed certificate valid for 365 days.
+set -e
 
 sudo mkdir -p /var/snap/maas/common/certs
 sudo openssl req -x509 -newkey rsa:4096 \

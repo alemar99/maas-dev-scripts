@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Script to query the MAAS v2 API
+# Query the MAAS v2 REST API with OAuth authentication.
+# Runs on the host or inside a container.
+# Usage: APIKEY=<key> ./curl-v2.sh <endpoint> [curl-args...]
+set -e
 
 IP=$(hostname -I | cut -d" " -f1)
 MAAS_URL="http://$IP:5240"

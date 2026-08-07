@@ -5,6 +5,7 @@
 #   /scripts/maas-install.sh snap <DB_IP> <MAAS_CHANNEL>
 #   /scripts/maas-install.sh deb  <PPA> <BRANCH>
 # This is mounted at /scripts inside containers via the LXD profile.
+set -e
 
 METHOD="$1"
 
