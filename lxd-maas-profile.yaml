@@ -1,12 +1,12 @@
 config:
     security.nesting: true
+    # don't include pgcli as it will install psycopg3 and will break deb setups
     user.vendor-data: |
         #cloud-config
         packages:
         - git 
         - build-essential
         - jq
-        - pgcli
         - rsync
         - python3-yaml
         - software-properties-common

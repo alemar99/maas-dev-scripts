@@ -12,3 +12,5 @@ sudo openssl req -x509 -newkey rsa:4096 \
 sudo maas config-tls enable --yes \
    /var/snap/maas/common/certs/server.key \
    /var/snap/maas/common/certs/server.crt
+
+sudo snap restart maas

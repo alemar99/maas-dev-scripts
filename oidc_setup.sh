@@ -13,6 +13,6 @@ maas admin oidc-providers create -k \
     client_id="$CLIENT_ID" \
     client_secret="$CLIENT_SECRET" \
     enabled=true \
-    tokentype=Opaque \
+    token_type="Opaque" \
     redirect_uri="http://$HOST_IP:5240/MAAS/r/login/oidc/callback" \
     scopes='openid profile email offline_access'

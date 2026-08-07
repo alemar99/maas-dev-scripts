@@ -30,8 +30,6 @@ case "$METHOD" in
 
         clone_maas "$BRANCH"
 
-        sudo snap install --beta snapd
-        sudo snap install --beta core26
         sudo snap install maas --channel="$MAAS_CHANNEL"
         /work/utilities/connect-snap-interfaces
 
