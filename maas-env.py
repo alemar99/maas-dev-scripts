@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, NamedTuple, Self
 
+try:
+    import argcomplete  # pip install argcomplete; eval "$(register-python-argcomplete maas-env.py)"
+except ImportError:
+    argcomplete = None  # type: ignore[assignment]
+
 log = logging.getLogger("maas-env")
 log.setLevel(logging.INFO)
 
@@ -887,9 +892,22 @@ class DestroyCommand(Command):
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         self.add_env_args(parser)
+        parser.add_argument(
+            "--yes",
+            action="store_true",
+            help="Skip the destroy confirmation prompt (for scripted use)",
+        )
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
         _, containers = self.lookup(env.registry, args.name)
+        if not env.dry_run and not args.yes:
+            answer = input(
+                f"Destroy environment '{args.name}'? "
+                "This will delete all containers and the LXD network. [y/N] "
+            )
+            if answer.strip().lower() != "y":
+                log.info("Aborted.")
+                return
         env.destroy(args.name, containers)
 
 
@@ -976,17 +994,62 @@ class OverlayCommand(Command):
             self.add_env_args(p)
             p.add_argument(
                 "--config",
-                required=True,
+                required=False,
+                default=None,
                 metavar="PATH",
-                help="Path to the overlay config YAML (must live inside this repo)",
+                help="Path to the overlay config YAML (must live inside this repo). "
+                "Auto-selected from the environment's MAAS channel when omitted.",
             )
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
-        config = self._config_in_container(args.config)
         record, containers = self.lookup(env.registry, args.name)
         method = record.type_ if record is not None else "snap"
+        repo_root = str(Path(__file__).resolve().parent)
+        if args.config and args.config.strip():
+            config = self._config_in_container(args.config)
+        else:
+            channel = record.maas_channel if record is not None else None
+            if not channel:
+                log.error(
+                    "ERROR: --config is required (environment has no recorded channel)"
+                )
+                sys.exit(1)
+            try:
+                host_config = self._channel_to_overlay_config(channel, repo_root)
+                log.info("[overlay] Auto-selected config: %s", host_config)
+            except ValueError as exc:
+                log.error("ERROR: %s", exc)
+                sys.exit(1)
+            config = self._map_into_repo(host_config, repo_root)
         subcommand = "sync" if args.overlay_action == "apply" else "unsync"
         env.overlay(containers, subcommand, config, method)
+
+    @staticmethod
+    def _channel_to_overlay_config(channel: str, repo_root: str) -> str:
+        """Map a MAAS channel string to the appropriate overlay config file path.
+
+        Rules:
+        - Channel starting with '3.7' → overlay-config-37.yaml
+        - Channel starting with 'master', 'main', or 'latest' → overlay-config-master.yaml
+        - Otherwise raise ValueError with a helpful message.
+        """
+        prefix = channel.split("/")[0].strip()
+        if prefix == "3.7":
+            name = "overlay-config-37.yaml"
+        elif prefix in ("master", "main", "latest"):
+            name = "overlay-config-master.yaml"
+        else:
+            raise ValueError(
+                f"Cannot auto-select overlay config for channel '{channel}'. "
+                f"Pass --config explicitly."
+            )
+        path = os.path.join(repo_root, name)
+        if not os.path.isfile(path):
+            raise ValueError(
+                f"Auto-selected overlay config '{name}' for channel '{channel}' "
+                f"does not exist at {path}. Pass --config explicitly."
+            )
+        return path
 
     @classmethod
     def _config_in_container(cls, config_arg: str) -> str:
@@ -1022,6 +1085,107 @@ class OverlayCommand(Command):
         return f"{mount}/{rel}"
 
 
+class StatusCommand(Command):
+    name = "status"
+    help = "Show containers, MAAS URL, and overlay state for an environment"
+
+    def configure(self, parser: argparse.ArgumentParser) -> None:
+        self.add_env_args(parser)
+
+    def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
+        record, containers = self.lookup(env.registry, args.name)
+        log.info("Environment : %s", args.name)
+        log.info("Mode        : %s", record.mode if record else "single")
+        log.info("")
+        for c in containers:
+            running = env.lxd.is_container_running(c)
+            status_str = "RUNNING" if running else "STOPPED"
+            log.info("  Container : %s  [%s]", c, status_str)
+            if running:
+                result = subprocess.run(
+                    ["lxc", "exec", c, "--", "hostname", "-I"],
+                    text=True, capture_output=True,
+                )
+                ip = result.stdout.strip().split()[0] if result.stdout.strip() else "unknown"
+                log.info("  MAAS URL  : http://%s:5240/MAAS", ip)
+                ov = subprocess.run(
+                    ["lxc", "exec", c, "--", "sh", "-c",
+                     "mount 2>/dev/null | grep -q overlay && echo applied || echo not-applied"],
+                    text=True, capture_output=True,
+                )
+                overlay_state = ov.stdout.strip() if ov.returncode == 0 else "unknown"
+                log.info("  Overlay   : %s", overlay_state)
+            log.info("")
+
+
+class LogsCommand(Command):
+    name = "logs"
+    help = "Tail MAAS service logs from the primary container"
+
+    def configure(self, parser: argparse.ArgumentParser) -> None:
+        self.add_env_args(parser)
+        parser.add_argument("--container", default=None, help="Target a specific container")
+        parser.add_argument(
+            "--deb", action="store_true",
+            help="Use deb service name (maas-regiond) instead of snap",
+        )
+
+    def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
+        record, containers = self.lookup(env.registry, args.name)
+        container = args.container or containers[0]
+        unit = "maas-regiond" if args.deb else "snap.maas.supervisor"
+        log.info("[logs] Tailing %s on %s (Ctrl-C to stop)", unit, container)
+        os.execvp(
+            "lxc",
+            ["lxc", "exec", container, "--",
+             "journalctl", "-u", unit, "-f", "-n", "100"],
+        )
+
+
+class ExecCommand(Command):
+    name = "exec"
+    help = "Run a command in the primary container of an environment"
+
+    def configure(self, parser: argparse.ArgumentParser) -> None:
+        self.add_env_args(parser)
+        parser.add_argument("--container", default=None, help="Target a specific container")
+        parser.add_argument(
+            "--all", action="store_true",
+            help="Run in all containers (multi mode)",
+        )
+        parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
+
+    def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
+        record, containers = self.lookup(env.registry, args.name)
+        if not args.command:
+            log.error("ERROR: COMMAND is required")
+            sys.exit(1)
+        targets = containers if args.all else [args.container or containers[0]]
+        failed = False
+        for c in targets:
+            log.info("[exec] %s: %s", c, " ".join(args.command))
+            result = subprocess.run(["lxc", "exec", c, "--"] + args.command)
+            if result.returncode != 0:
+                failed = True
+        if failed:
+            sys.exit(1)
+
+
+class ShellCommand(Command):
+    name = "shell"
+    help = "Open an interactive bash shell in the primary container"
+
+    def configure(self, parser: argparse.ArgumentParser) -> None:
+        self.add_env_args(parser)
+        parser.add_argument("--container", default=None, help="Target a specific container")
+
+    def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
+        record, containers = self.lookup(env.registry, args.name)
+        container = args.container or containers[0]
+        log.info("[shell] Opening shell in %s", container)
+        os.execvp("lxc", ["lxc", "exec", container, "--", "bash"])
+
+
 class CLI:
     COMMANDS: tuple[type[Command], ...] = (
         CreateCommand,
@@ -1029,6 +1193,10 @@ class CLI:
         ListCommand,
         SyncCommand,
         OverlayCommand,
+        StatusCommand,
+        LogsCommand,
+        ExecCommand,
+        ShellCommand,
     )
 
     def __init__(self) -> None:
@@ -1036,7 +1204,7 @@ class CLI:
 
     def build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
-            description="Create/destroy MAAS test environments in LXD",
+            description="Create and destroy MAAS environments in LXD, and drive a fast edit→sync→overlay inner loop.",
         )
         sub = parser.add_subparsers(dest="command", metavar="COMMAND")
         sub.required = True
@@ -1054,7 +1222,10 @@ class CLI:
             os.execvp(exec_argv[0], exec_argv)
             return  # unreachable: execvp replaces the process image
 
-        args = self.build_parser().parse_args(argv)
+        parser = self.build_parser()
+        if argcomplete is not None:
+            argcomplete.autocomplete(parser)
+        args = parser.parse_args(argv)
 
         dry_run = getattr(args, "dry_run", False)
         env = MaasEnv(
