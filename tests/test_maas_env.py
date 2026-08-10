@@ -1,207 +1,235 @@
+import argparse
 import importlib.util
 import os
+import sys
 import unittest
 from pathlib import Path
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "maas-env.py"
 _spec = importlib.util.spec_from_file_location("maas_env", _MODULE_PATH)
 maas_env = importlib.util.module_from_spec(_spec)
+# Register before executing: dataclasses resolves annotations via sys.modules.
+sys.modules["maas_env"] = maas_env
 _spec.loader.exec_module(maas_env)
 
+Mode = maas_env.Mode
+InstallType = maas_env.InstallType
+NodeTarget = maas_env.NodeTarget
 
-class TestComputeContainers(unittest.TestCase):
-    def test_single_mode_returns_one_container(self):
-        self.assertEqual(maas_env.compute_containers("foo", "single"), ["foo"])
 
-    def test_multi_mode_returns_three_numbered_containers(self):
+class TestContainersFor(unittest.TestCase):
+    def test_single_mode_is_the_bare_name(self):
+        self.assertEqual(maas_env.containers_for("foo", Mode.SINGLE), ["foo"])
+
+    def test_multi_mode_is_three_numbered_nodes(self):
         self.assertEqual(
-            maas_env.compute_containers("foo", "multi"),
+            maas_env.containers_for("foo", Mode.MULTI),
             ["foo-1", "foo-2", "foo-3"],
         )
 
 
-class TestNormalizeSource(unittest.TestCase):
-    def test_adds_single_trailing_slash(self):
-        self.assertEqual(maas_env.normalize_source("/tmp/foo"), "/tmp/foo/")
-
-    def test_collapses_existing_trailing_slash(self):
-        self.assertEqual(maas_env.normalize_source("/tmp/foo/"), "/tmp/foo/")
-
-    def test_expands_user(self):
-        result = maas_env.normalize_source("~/foo")
-        self.assertTrue(result.startswith(os.path.expanduser("~")))
-        self.assertTrue(result.endswith("/foo/"))
-
-
-class TestBuildRshValue(unittest.TestCase):
-    def test_builds_rsh_string(self):
+class TestInstallInvocation(unittest.TestCase):
+    def test_snap_form(self):
+        install = maas_env.SnapInstall(channel="3.7/edge")
         self.assertEqual(
-            maas_env.build_rsh_value("/usr/bin/python3", "/x/maas-env.py"),
-            "/usr/bin/python3 /x/maas-env.py --rsh-shim",
+            install.invocation("10.0.0.5"),
+            "/scripts/maas-install.sh snap 10.0.0.5 3.7/edge",
         )
 
+    def test_snap_needs_a_separate_db_and_records_its_channel(self):
+        install = maas_env.SnapInstall(channel="3.7/edge")
+        self.assertFalse(install.provisions_own_db)
+        self.assertEqual(install.registry_channel, "3.7/edge")
 
-class TestBuildRsyncCommand(unittest.TestCase):
-    def test_builds_expected_argv(self):
-        cmd = maas_env.build_rsync_command(
-            "/src/",
-            "c1",
-            "/work",
-            "PYBIN /x/maas-env.py --rsh-shim",
-            [".git", "__pycache__", "*.pyc"],
+    def test_deb_form(self):
+        install = maas_env.DebInstall(ppa="ppa:maas/3.7", branch="3.7")
+        self.assertEqual(
+            install.invocation(None),
+            "/scripts/maas-install.sh deb ppa:maas/3.7 3.7",
         )
+
+    def test_deb_brings_its_own_db_and_has_no_channel(self):
+        install = maas_env.DebInstall(ppa="ppa:maas/3.7", branch="3.7")
+        self.assertTrue(install.provisions_own_db)
+        self.assertIsNone(install.registry_channel)
+
+
+class TestRsyncCommand(unittest.TestCase):
+    def _command(self, source="/src/", container="c1", dest="/work"):
+        return maas_env.MaasEnv._rsync_command(source, container, dest, "RSH")
+
+    def test_archive_and_delete_flags(self):
+        cmd = self._command()
         self.assertEqual(cmd[0], "rsync")
-        self.assertIn("-a", cmd)
-        self.assertIn("--no-owner", cmd)
-        self.assertIn("--no-group", cmd)
-        self.assertIn("--delete", cmd)
-        self.assertEqual(cmd.count("--exclude"), 3)
-        self.assertIn(".git", cmd)
-        self.assertIn("__pycache__", cmd)
-        self.assertIn("*.pyc", cmd)
-        e_idx = cmd.index("-e")
-        self.assertEqual(cmd[e_idx + 1], "PYBIN /x/maas-env.py --rsh-shim")
-        self.assertEqual(cmd[-2], "/src/")
+        for flag in ("-a", "--no-owner", "--no-group", "--delete"):
+            self.assertIn(flag, cmd)
+
+    def test_uses_the_shim_as_transport(self):
+        cmd = self._command()
+        self.assertEqual(cmd[cmd.index("-e") + 1], "RSH")
+
+    def test_excludes_are_passed_through(self):
+        cmd = self._command()
+        for pattern in maas_env.EXCLUDES:
+            self.assertIn(pattern, cmd)
+
+    def test_source_and_destination_are_the_final_operands(self):
+        cmd = self._command(source="/src/", container="c1", dest="/work")
+        self.assertEqual(cmd[-2:], ["/src/", "c1:/work/"])
+
+    def test_destination_trailing_slash_is_normalised(self):
+        cmd = self._command(dest="/work/")
         self.assertEqual(cmd[-1], "c1:/work/")
 
-    def test_dest_trailing_slash_is_normalized(self):
-        cmd = maas_env.build_rsync_command("/src/", "c1", "/work/", "RSH", [])
-        self.assertEqual(cmd[-1], "c1:/work/")
 
-
-class TestBuildShimExecArgv(unittest.TestCase):
-    def test_builds_lxc_exec_argv(self):
+class TestShimExecArgv(unittest.TestCase):
+    def test_runs_the_remote_command_as_the_container_user(self):
         self.assertEqual(
-            maas_env.build_shim_exec_argv(["c1", "rsync", "--server", "x"]),
+            maas_env.CLI._shim_exec_argv(["c1", "rsync", "--server", "x"]),
             [
-                "lxc", "exec", "--user", "1000", "--group", "1000",
-                "c1", "--", "rsync", "--server", "x",
+                "lxc",
+                "exec",
+                "--user",
+                str(maas_env.CONTAINER_UID),
+                "--group",
+                str(maas_env.CONTAINER_GID),
+                "c1",
+                "--",
+                "rsync",
+                "--server",
+                "x",
             ],
         )
 
 
-class TestParseContainerRunning(unittest.TestCase):
-    def test_running(self):
-        self.assertTrue(
-            maas_env.parse_container_running("Name: c1\nStatus: RUNNING\n")
-        )
+class TestSyncSourceValidation(unittest.TestCase):
+    def test_adds_a_single_trailing_slash(self):
+        for raw in ("/tmp/foo", "/tmp/foo/", "/tmp/foo//"):
+            self.assertEqual(
+                maas_env.SyncCommand._normalize_source(raw), "/tmp/foo/", msg=raw
+            )
 
-    def test_stopped(self):
-        self.assertFalse(
-            maas_env.parse_container_running("Name: c1\nStatus: STOPPED\n")
-        )
+    def test_expands_tilde(self):
+        result = maas_env.SyncCommand._normalize_source("~/foo")
+        self.assertFalse(result.startswith("~"))
+        self.assertEqual(result, os.path.expanduser("~/foo") + "/")
 
-    def test_case_insensitive(self):
-        self.assertTrue(maas_env.parse_container_running("Status: Running"))
+    def test_detects_paths_resolving_to_root(self):
+        for raw in ("/", "/.", "/..", "/home/.."):
+            self.assertTrue(maas_env.SyncCommand._resolves_to_root(raw), msg=raw)
 
-    def test_no_status_line(self):
-        self.assertFalse(maas_env.parse_container_running("Name: c1\n"))
-
-
-class TestSourceResolvesToRoot(unittest.TestCase):
-    def test_literal_root(self):
-        self.assertTrue(maas_env.source_resolves_to_root("/"))
-
-    def test_dot_and_dotdot_paths_resolve_to_root(self):
-        for raw in ("/.", "/..", "/home/.."):
-            self.assertTrue(maas_env.source_resolves_to_root(raw), msg=raw)
-
-    def test_normal_directory_is_not_root(self):
-        self.assertFalse(maas_env.source_resolves_to_root("/tmp"))
-        self.assertFalse(maas_env.source_resolves_to_root("."))
+    def test_ordinary_paths_are_not_root(self):
+        for raw in ("/tmp", "."):
+            self.assertFalse(maas_env.SyncCommand._resolves_to_root(raw), msg=raw)
 
 
-class TestContainerConfigPath(unittest.TestCase):
-    def test_maps_repo_root_config(self):
+class TestOverlayConfigPath(unittest.TestCase):
+    def test_maps_a_repo_relative_config_into_the_bind_mount(self):
         self.assertEqual(
-            maas_env.container_config_path(
+            maas_env.OverlayCommand._map_into_repo(
                 "/repo/overlay-config-37.yaml", "/repo"
             ),
             "/scripts/overlay-config-37.yaml",
         )
 
-    def test_maps_nested_config(self):
+    def test_preserves_subdirectories(self):
         self.assertEqual(
-            maas_env.container_config_path("/repo/configs/x.yaml", "/repo"),
+            maas_env.OverlayCommand._map_into_repo("/repo/configs/x.yaml", "/repo"),
             "/scripts/configs/x.yaml",
         )
 
-    def test_rejects_config_outside_repo(self):
+    def test_rejects_configs_outside_the_repo(self):
         with self.assertRaises(ValueError):
-            maas_env.container_config_path("/etc/x.yaml", "/repo")
+            maas_env.OverlayCommand._map_into_repo("/etc/x.yaml", "/repo")
 
-    def test_respects_custom_mount(self):
-        self.assertEqual(
-            maas_env.container_config_path(
-                "/repo/c.yaml", "/repo", mount="/mnt/repo"
-            ),
-            "/mnt/repo/c.yaml",
+    def test_rejects_traversal_out_of_the_repo(self):
+        with self.assertRaises(ValueError):
+            maas_env.OverlayCommand._map_into_repo("/repo/../x.yaml", "/repo")
+
+
+class TestOverlayConfigForChannel(unittest.TestCase):
+    _REPO_ROOT = str(_MODULE_PATH.parent)
+
+    def _config_for(self, channel):
+        return maas_env.OverlayCommand._config_for_channel(channel, self._REPO_ROOT)
+
+    def test_37_channels_select_the_37_config(self):
+        for channel in ("3.7", "3.7/edge", "3.7/stable"):
+            self.assertTrue(
+                self._config_for(channel).endswith("overlay-config-37.yaml"),
+                msg=channel,
+            )
+
+    def test_tip_channels_select_the_master_config(self):
+        for channel in ("latest/edge", "master", "main/stable"):
+            self.assertTrue(
+                self._config_for(channel).endswith("overlay-config-master.yaml"),
+                msg=channel,
+            )
+
+    def test_unknown_channel_raises(self):
+        with self.assertRaises(ValueError):
+            self._config_for("2.9/stable")
+
+    def test_missing_config_file_raises(self):
+        with self.assertRaises(ValueError):
+            maas_env.OverlayCommand._config_for_channel("3.7/edge", "/nonexistent")
+
+
+class TestOverlayCommandBuilders(unittest.TestCase):
+    def test_runs_from_the_container_rootfs_workdir(self):
+        cmd = maas_env.MaasEnv._overlay_command(
+            "sync", "/scripts/c.yaml", InstallType.SNAP
         )
+        self.assertTrue(cmd.startswith("cd /work && "))
 
-
-class TestBuildOverlayCommand(unittest.TestCase):
-    def test_sync_command_snap(self):
-        self.assertEqual(
-            maas_env.build_overlay_command(
-                "python3",
-                "/scripts/overlay-mount.py",
-                "sync",
-                "/scripts/overlay-config-37.yaml",
-                "snap",
-            ),
-            "cd /work && python3 /scripts/overlay-mount.py sync "
-            "--config /scripts/overlay-config-37.yaml --snap",
+    def test_snap_and_deb_select_their_config_section(self):
+        snap = maas_env.MaasEnv._overlay_command(
+            "sync", "/scripts/c.yaml", InstallType.SNAP
         )
-
-    def test_unsync_command_snap(self):
-        self.assertEqual(
-            maas_env.build_overlay_command(
-                "python3",
-                "/scripts/overlay-mount.py",
-                "unsync",
-                "/scripts/overlay-config-master.yaml",
-                "snap",
-            ),
-            "cd /work && python3 /scripts/overlay-mount.py unsync "
-            "--config /scripts/overlay-config-master.yaml --snap",
+        deb = maas_env.MaasEnv._overlay_command(
+            "sync", "/scripts/c.yaml", InstallType.DEB
         )
+        self.assertTrue(snap.endswith("--snap"))
+        self.assertTrue(deb.endswith("--deb"))
 
-    def test_sync_command_deb(self):
-        self.assertEqual(
-            maas_env.build_overlay_command(
-                "python3",
-                "/scripts/overlay-mount.py",
-                "sync",
-                "/scripts/overlay-config-37.yaml",
-                "deb",
-            ),
-            "cd /work && python3 /scripts/overlay-mount.py sync "
-            "--config /scripts/overlay-config-37.yaml --deb",
+    def test_unsync_uses_the_unsync_subcommand(self):
+        cmd = maas_env.MaasEnv._overlay_command(
+            "unsync", "/scripts/c.yaml", InstallType.SNAP
         )
+        self.assertIn(f"{maas_env.OVERLAY_SCRIPT} unsync", cmd)
 
-    def test_defaults_to_snap(self):
-        cmd = maas_env.build_overlay_command(
-            "python3", "/scripts/overlay-mount.py", "sync", "/cfg.yaml"
-        )
-        self.assertTrue(cmd.endswith("--snap"))
-
-
-class TestBuildRestartCommand(unittest.TestCase):
-    def test_snap(self):
+    def test_restart_command_per_install_type(self):
         self.assertEqual(
-            maas_env.build_restart_command("snap"), "sudo snap restart maas"
+            maas_env.MaasEnv._restart_command(InstallType.SNAP),
+            "sudo snap restart maas",
         )
-
-    def test_deb(self):
         self.assertEqual(
-            maas_env.build_restart_command("deb"),
+            maas_env.MaasEnv._restart_command(InstallType.DEB),
             "sudo systemctl restart 'maas-*'",
         )
 
-    def test_unknown_defaults_to_snap(self):
-        self.assertEqual(
-            maas_env.build_restart_command("other"), "sudo snap restart maas"
-        )
+
+class TestResolveScriptTargets(unittest.TestCase):
+    _MULTI = ["e-1", "e-2", "e-3"]
+
+    def _resolve(self, target, containers):
+        script = maas_env.ScriptTarget(path="s.sh", target=target)
+        return maas_env.MaasEnv._resolve_targets(script, containers, "pre-install")
+
+    def test_all_targets_every_container(self):
+        self.assertEqual(self._resolve(NodeTarget.ALL, self._MULTI), self._MULTI)
+
+    def test_node_targets_map_to_their_index(self):
+        for target, expected in (
+            (NodeTarget.NODE1, "e-1"),
+            (NodeTarget.NODE2, "e-2"),
+            (NodeTarget.NODE3, "e-3"),
+        ):
+            self.assertEqual(self._resolve(target, self._MULTI), [expected])
+
+    def test_missing_node_is_skipped(self):
+        self.assertIsNone(self._resolve(NodeTarget.NODE2, ["only"]))
 
 
 class TestExcludes(unittest.TestCase):
@@ -213,95 +241,128 @@ class TestExcludes(unittest.TestCase):
             self.assertIn(pattern, maas_env.EXCLUDES)
 
 
-class TestBuildInstallInvocation(unittest.TestCase):
-    def test_snap_form(self):
+class TestParseScriptArg(unittest.TestCase):
+    def test_parses_path_and_target(self):
         self.assertEqual(
-            maas_env.build_install_invocation(
-                "snap", db_ip="10.0.0.5", channel="3.7/edge"
-            ),
-            "/scripts/maas-install.sh snap 10.0.0.5 3.7/edge",
+            maas_env.CreateCommand._parse_script_arg("./setup.sh:node2"),
+            maas_env.ScriptTarget("./setup.sh", NodeTarget.NODE2),
         )
 
-    def test_deb_form(self):
+    def test_splits_on_the_last_colon(self):
         self.assertEqual(
-            maas_env.build_install_invocation(
-                "deb", ppa="ppa:maas/3.7", branch="3.7"
-            ),
-            "/scripts/maas-install.sh deb ppa:maas/3.7 3.7",
+            maas_env.CreateCommand._parse_script_arg("a:b/setup.sh:all").path,
+            "a:b/setup.sh",
         )
 
-    def test_unknown_method_raises(self):
-        with self.assertRaises(ValueError):
-            maas_env.build_install_invocation("flatpak")
+    def test_rejects_a_missing_target(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            maas_env.CreateCommand._parse_script_arg("./setup.sh")
+
+    def test_rejects_an_unknown_target(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            maas_env.CreateCommand._parse_script_arg("./setup.sh:node9")
 
 
-class TestValidateDebFlags(unittest.TestCase):
-    def test_ppa_without_deb_is_error(self):
-        self.assertIsNotNone(
-            maas_env.validate_deb_flags(False, "ppa:maas/3.7", None)
+class TestParser(unittest.TestCase):
+    def setUp(self):
+        self.parser = maas_env.CLI().build_parser()
+
+    def test_create_snap_defaults(self):
+        args = self.parser.parse_args(["create", "snap", "dev"])
+        self.assertEqual(args.name, "dev")
+        self.assertEqual(args.mode, Mode.SINGLE)
+        self.assertEqual(args.channel, "latest/edge")
+
+    def test_create_deb_requires_ppa_and_branch(self):
+        args = self.parser.parse_args(
+            ["create", "deb", "dev", "--ppa", "ppa:maas/3.7", "--branch", "3.7"]
         )
-
-    def test_branch_without_deb_is_error(self):
-        self.assertIsNotNone(
-            maas_env.validate_deb_flags(False, None, "3.7")
-        )
-
-    def test_neither_without_deb_is_ok(self):
-        self.assertIsNone(maas_env.validate_deb_flags(False, None, None))
-
-    def test_deb_alone_is_ok(self):
-        self.assertIsNone(maas_env.validate_deb_flags(True, None, None))
-
-
-class TestValidateDebCreateArgs(unittest.TestCase):
-    def test_deb_multi_is_error(self):
-        self.assertIsNotNone(
-            maas_env.validate_deb_create_args(
-                True, "multi", "ppa:maas/3.7", "3.7"
-            )
-        )
-
-    def test_deb_without_ppa_is_error(self):
-        self.assertIsNotNone(
-            maas_env.validate_deb_create_args(True, "single", None, "3.7")
-        )
-
-    def test_deb_without_branch_is_error(self):
-        self.assertIsNotNone(
-            maas_env.validate_deb_create_args(
-                True, "single", "ppa:maas/3.7", None
-            )
-        )
-
-    def test_valid_deb_args_ok(self):
-        self.assertIsNone(
-            maas_env.validate_deb_create_args(
-                True, "single", "ppa:maas/3.7", "3.7"
-            )
-        )
-
-    def test_plain_snap_ok(self):
-        self.assertIsNone(
-            maas_env.validate_deb_create_args(False, "multi", None, None)
-        )
-
-
-class TestBuildParserDebArgs(unittest.TestCase):
-    def test_deb_args_parse(self):
-        parser = maas_env.build_parser()
-        args = parser.parse_args(
-            ["--name", "dev", "--deb", "--ppa", "ppa:maas/3.7", "--branch", "3.7"]
-        )
-        self.assertTrue(args.deb)
         self.assertEqual(args.ppa, "ppa:maas/3.7")
         self.assertEqual(args.branch, "3.7")
+        # deb is single-node only, so it has no --mode.
+        self.assertFalse(hasattr(args, "mode"))
 
-    def test_deb_defaults_off(self):
-        parser = maas_env.build_parser()
-        args = parser.parse_args(["--name", "dev"])
-        self.assertFalse(args.deb)
-        self.assertIsNone(args.ppa)
-        self.assertIsNone(args.branch)
+    def test_create_deb_without_ppa_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["create", "deb", "dev", "--branch", "3.7"])
+
+    def test_install_type_is_required_for_create(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["create", "dev"])
+
+    def test_overlay_config_is_optional(self):
+        args = self.parser.parse_args(["overlay", "apply", "dev"])
+        self.assertIsNone(args.config)
+
+    def test_overlay_action_is_required(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["overlay", "dev"])
+
+    def test_exec_keeps_its_own_options_out_of_the_command(self):
+        args = self.parser.parse_args(["exec", "dev", "--all", "--", "ls", "-la"])
+        self.assertTrue(args.all)
+        self.assertEqual(args.argv, ["ls", "-la"])
+
+    def test_sync_dest_defaults_to_work(self):
+        args = self.parser.parse_args(["sync", "dev", "~/work/maas"])
+        self.assertEqual(args.dest, "/work")
+
+
+class TestInstallFromArgs(unittest.TestCase):
+    def _install(self, argv):
+        args = maas_env.CLI().build_parser().parse_args(argv)
+        return maas_env.CreateCommand._install_from_args(args)
+
+    def test_snap_args_build_a_snap_install(self):
+        install = self._install(["create", "snap", "dev", "--channel", "3.7/edge"])
+        self.assertIsInstance(install, maas_env.SnapInstall)
+        self.assertEqual(install.install_type, InstallType.SNAP)
+        self.assertEqual(install.channel, "3.7/edge")
+
+    def test_deb_args_build_a_deb_install(self):
+        install = self._install(
+            ["create", "deb", "dev", "--ppa", "ppa:maas/3.7", "--branch", "3.7"]
+        )
+        self.assertIsInstance(install, maas_env.DebInstall)
+        self.assertEqual(install.install_type, InstallType.DEB)
+
+
+class FakeRegistry(maas_env.Registry):
+    def __init__(self, envs=None):
+        self.envs = dict(envs or {})
+
+    def path(self):
+        return Path("/tmp/fake.db")
+
+    def add(self, env):
+        self.envs[env.name] = env
+
+    def list_envs(self):
+        return list(self.envs.values())
+
+    def get(self, name):
+        return self.envs.get(name)
+
+    def delete(self, name):
+        self.envs.pop(name, None)
+
+
+class TestCommandLookup(unittest.TestCase):
+    def test_uses_the_recorded_mode(self):
+        env = maas_env.Env(
+            name="dev",
+            mode=Mode.MULTI,
+            install_type=InstallType.SNAP,
+            maas_channel="3.7/edge",
+        )
+        record, containers = maas_env.Command.lookup(FakeRegistry({"dev": env}), "dev")
+        self.assertIs(record, env)
+        self.assertEqual(containers, ["dev-1", "dev-2", "dev-3"])
+
+    def test_untracked_names_fall_back_to_single(self):
+        record, containers = maas_env.Command.lookup(FakeRegistry(), "dev")
+        self.assertIsNone(record)
+        self.assertEqual(containers, ["dev"])
 
 
 if __name__ == "__main__":

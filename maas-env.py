@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import argparse
-from collections.abc import Generator
-from contextlib import contextmanager
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal, NamedTuple, Self
+from typing import ClassVar, NamedTuple, Self
 
 try:
     import argcomplete  # pip install argcomplete; eval "$(register-python-argcomplete maas-env.py)"
@@ -47,17 +48,48 @@ OVERLAY_SCRIPT = "/scripts/overlay-mount.py"
 # In-container path to the install script (bind-mounted at /scripts).
 INSTALL_SCRIPT = "/scripts/maas-install.sh"
 
+# The `ubuntu` user inside the containers. Host uid/gid are idmapped onto it so
+# bind mounts and rsynced files keep the ownership maas-install.sh expects.
+CONTAINER_UID = 1000
+CONTAINER_GID = 1000
+
+
+class Mode(StrEnum):
+    SINGLE = "single"
+    MULTI = "multi"
+
+
+class InstallType(StrEnum):
+    SNAP = "snap"
+    DEB = "deb"
+
+
+class NodeTarget(StrEnum):
+    ALL = "all"
+    NODE1 = "node1"
+    NODE2 = "node2"
+    NODE3 = "node3"
+
+
+def containers_for(name: str, mode: Mode) -> list[str]:
+    """Return the container names for a given base name and mode."""
+    if mode is Mode.SINGLE:
+        return [name]
+    return [f"{name}-{i}" for i in (1, 2, 3)]
+
 
 class ScriptTarget(NamedTuple):
     path: str
-    target: str  # "all", "node1", "node2", "node3"
+    target: NodeTarget
 
 
 @dataclass
 class Env:
+    """An environment as recorded in the registry."""
+
     name: str
-    mode: Literal["single", "multi"]
-    type_: Literal["snap", "deb"]
+    mode: Mode
+    install_type: InstallType
     maas_channel: str | None
     created_at: str | None = None
 
@@ -67,11 +99,23 @@ class Env:
             return None
         return cls(
             name=row["name"],
-            mode=row["mode"],
-            type_=row["type"],
+            mode=Mode(row["mode"]),
+            install_type=InstallType(row["type"]),
             maas_channel=row["maas_channel"],
             created_at=row["created_at"],
         )
+
+
+@dataclass
+class EnvironmentSpec:
+    """Everything needed to create a new MAAS environment."""
+
+    name: str
+    mode: Mode
+    ubuntu: str
+    profile: str
+    pre_scripts: list[ScriptTarget]
+    post_scripts: list[ScriptTarget]
 
 
 class Registry(ABC):
@@ -105,8 +149,8 @@ class SqliteRegistry(Registry):
         return Path(data_home) / "maas-env" / "environments.db"
 
     def ensure_db(self) -> None:
-        path = self.path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        db_path = self.path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as cursor:
             cursor.execute(
                 """
@@ -122,12 +166,14 @@ class SqliteRegistry(Registry):
 
     @contextmanager
     def connect(self) -> Generator[sqlite3.Cursor]:
-        """Open (creating if needed) the registry DB and ensure the schema exists."""
+        """Open (creating if needed) the registry DB and yield a cursor."""
         conn = sqlite3.connect(self.path())
         conn.row_factory = sqlite3.Row
-        yield conn.cursor()
-        conn.commit()
-        conn.close()
+        try:
+            yield conn.cursor()
+            conn.commit()
+        finally:
+            conn.close()
 
     def add(self, env: Env) -> None:
         """Insert (or replace) an environment record in the registry."""
@@ -142,8 +188,8 @@ class SqliteRegistry(Registry):
                     "VALUES (?, ?, ?, ?, ?)",
                     (
                         env.name,
-                        env.mode,
-                        env.type_,
+                        str(env.mode),
+                        str(env.install_type),
                         env.maas_channel,
                         datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     ),
@@ -187,7 +233,7 @@ class SqliteRegistry(Registry):
 
 
 class Install(ABC):
-    type_: Literal["snap", "deb"]
+    install_type: InstallType
 
     @abstractmethod
     def invocation(self, db_ip: str | None) -> str:
@@ -206,7 +252,7 @@ class Install(ABC):
 
 @dataclass
 class SnapInstall(Install):
-    type_ = "snap"
+    install_type = InstallType.SNAP
     channel: str
 
     def invocation(self, db_ip: str | None) -> str:
@@ -219,7 +265,7 @@ class SnapInstall(Install):
 
 @dataclass
 class DebInstall(Install):
-    type_ = "deb"
+    install_type = InstallType.DEB
     ppa: str
     branch: str
 
@@ -237,60 +283,77 @@ class Lxd:
         self.dry_run = dry_run
 
     @staticmethod
-    def _echo_dry(cmd_args: list[str]) -> None:
+    def _log_dry(cmd_args: list[str]) -> None:
         log.info("[dry-run] %s", " ".join(cmd_args))
+
+    @staticmethod
+    def _fail_on_error(result: subprocess.CompletedProcess) -> None:
+        """Log stderr and exit if the process failed."""
+        if result.returncode != 0:
+            log.error(result.stderr.strip())
+            sys.exit(1)
 
     def run(self, cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
         """Run a host command. If dry_run, print it instead."""
         if self.dry_run:
-            self._echo_dry(cmd)
+            self._log_dry(cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         log.info("  $ %s", " ".join(cmd))
         result = subprocess.run(cmd, text=True, capture_output=True)
-        if check and result.returncode != 0:
-            log.error(result.stderr.strip())
-            sys.exit(1)
+        if check:
+            self._fail_on_error(result)
         return result
 
     def exec(
         self, container: str, cmd: str, *, check: bool = True
     ) -> subprocess.CompletedProcess:
-        """Run a command inside an LXD container."""
+        """Run a shell command inside an LXD container."""
         argv = ["lxc", "exec", container, "--", "sh", "-c", cmd]
         if self.dry_run:
-            self._echo_dry(argv)
+            self._log_dry(argv)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         log.info("  [%s] $ %s", container, cmd)
         result = subprocess.run(argv, text=True, capture_output=True)
-        if check and result.returncode != 0:
-            log.error(result.stderr.strip())
-            sys.exit(1)
+        if check:
+            self._fail_on_error(result)
         if result.stdout.strip():
             log.info(result.stdout.strip())
         return result
 
     def exec_capture(self, container: str, cmd: str) -> str:
-        """Run a command inside a container and return its stdout."""
+        """Run a shell command inside a container and return its stdout."""
         argv = ["lxc", "exec", container, "--", "sh", "-c", cmd]
         if self.dry_run:
-            self._echo_dry(argv)
+            self._log_dry(argv)
             return ""
         result = subprocess.run(argv, text=True, capture_output=True)
-        if result.returncode != 0:
-            log.error(result.stderr.strip())
-            sys.exit(1)
+        self._fail_on_error(result)
         return result.stdout.strip()
 
+    def exec_passthrough(self, container: str, argv: list[str]) -> int:
+        """Run a command in a container with the caller's stdio. Return its exit code."""
+        cmd = ["lxc", "exec", container, "--", *argv]
+        if self.dry_run:
+            self._log_dry(cmd)
+            return 0
+        return subprocess.run(cmd).returncode
+
+    def exec_replace(self, container: str, argv: list[str]) -> None:
+        """Replace this process with a command running in the container."""
+        cmd = ["lxc", "exec", container, "--", *argv]
+        if self.dry_run:
+            self._log_dry(cmd)
+            return
+        os.execvp(cmd[0], cmd)
+
     def is_container_running(self, container: str) -> bool:
-        """Check whether a container exists and is running (via `lxc info`)."""
+        """Check whether a container exists and is running (via `lxc ls`)."""
         result = subprocess.run(
             ["lxc", "ls", "--columns", "s", "--format", "csv", container],
             text=True,
             capture_output=True,
         )
-        if result.returncode != 0:
-            return False
-        return True if result.stdout.strip() == "RUNNING" else False
+        return result.returncode == 0 and result.stdout.strip() == "RUNNING"
 
     def node_ip(self, container: str) -> str:
         """Return the container's primary IP address."""
@@ -300,7 +363,7 @@ class Lxd:
         """Create an LXD managed network."""
         network = f"{name}-net"
         log.info("[net] Creating LXD network %s", network)
-        result = self.run(["lxc", "network", "create", network], check=True)
+        result = self.run(["lxc", "network", "create", network], check=False)
         if result.returncode != 0:
             log.info("  (network already exists, skipping)")
 
@@ -321,71 +384,73 @@ class Lxd:
     ) -> None:
         """Launch and start LXD containers."""
         image = f"ubuntu:{ubuntu}"
-
-        for c in containers:
-            log.info("[container] Initializing %s from %s", c, image)
-            with open(profile, "rb") as f:
-                run_cmd = ["lxc", "init", image, c]
-                if self.dry_run:
-                    self._echo_dry(run_cmd + ["<", profile])
-                else:
-                    log.info("  $ %s < %s", " ".join(run_cmd), profile)
-                    result = subprocess.run(
-                        run_cmd,
-                        stdin=f,
-                        text=True,
-                        capture_output=True,
-                    )
-                    if result.returncode != 0:
-                        log.error(result.stderr.strip())
-                        sys.exit(1)
-            # Set idmap for correct bind mount permissions
-            uid = os.getuid()
-            gid = os.getgid()
-            idmap_input = f"uid {uid} 1000\ngid {gid} 1000\n"
-            if not self.dry_run:
-                result = subprocess.run(
-                    ["lxc", "config", "set", c, "raw.idmap", "-"],
-                    input=idmap_input,
-                    text=True,
-                    capture_output=True,
-                )
-                if result.returncode != 0:
-                    log.error(result.stderr.strip())
-                    sys.exit(1)
+        for container in containers:
+            self._init_container(container, image, profile)
+            self._set_idmap(container)
             if network:
-                self.run(
-                    [
-                        "lxc",
-                        "config",
-                        "device",
-                        "add",
-                        c,
-                        "eth0",
-                        "nic",
-                        f"network={network}",
-                    ]
-                )
+                self._attach_network(container, network)
 
-        for c in containers:
-            log.info("[container] Starting %s", c)
-            self.run(["lxc", "start", c])
+        for container in containers:
+            log.info("[container] Starting %s", container)
+            self.run(["lxc", "start", container])
+
+    def _init_container(self, container: str, image: str, profile: str) -> None:
+        log.info("[container] Initializing %s from %s", container, image)
+        cmd = ["lxc", "init", image, container]
+        if self.dry_run:
+            self._log_dry(cmd + ["<", profile])
+            return
+        log.info("  $ %s < %s", " ".join(cmd), profile)
+        with open(profile, "rb") as profile_file:
+            result = subprocess.run(
+                cmd, stdin=profile_file, text=True, capture_output=True
+            )
+        self._fail_on_error(result)
+
+    def _set_idmap(self, container: str) -> None:
+        """Map the host user onto the container's ubuntu user for bind mounts."""
+        idmap = f"uid {os.getuid()} {CONTAINER_UID}\ngid {os.getgid()} {CONTAINER_GID}\n"
+        cmd = ["lxc", "config", "set", container, "raw.idmap", "-"]
+        if self.dry_run:
+            self._log_dry(cmd)
+            return
+        result = subprocess.run(cmd, input=idmap, text=True, capture_output=True)
+        self._fail_on_error(result)
+
+    def _attach_network(self, container: str, network: str) -> None:
+        self.run(
+            [
+                "lxc",
+                "config",
+                "device",
+                "add",
+                container,
+                "eth0",
+                "nic",
+                f"network={network}",
+            ]
+        )
 
     def delete_containers(self, containers: list[str]) -> None:
         """Stop and delete LXD containers."""
-        for c in containers:
-            log.info("[container] Stopping %s", c)
-            result = self.run(["lxc", "stop", c, "--force"], check=False)
+        for container in containers:
+            log.info("[container] Stopping %s", container)
+            result = self.run(["lxc", "stop", container, "--force"], check=False)
             if result.returncode != 0:
                 log.warning("  (container may not exist, skipping)")
-        for c in containers:
-            log.info("[container] Deleting %s", c)
-            result = self.run(["lxc", "delete", c], check=False)
+        for container in containers:
+            log.info("[container] Deleting %s", container)
+            result = self.run(["lxc", "delete", container], check=False)
             if result.returncode != 0:
                 log.warning("  (container may not exist, skipping)")
 
 
 class MaasEnv:
+    _RESTART_COMMANDS: ClassVar = {
+        InstallType.DEB: "sudo systemctl restart 'maas-*'",
+        InstallType.SNAP: "sudo snap restart maas",
+    }
+
     def __init__(self, lxd: Lxd, registry: Registry, dry_run: bool = False) -> None:
         self.lxd = lxd
         self.registry = registry
@@ -393,26 +458,24 @@ class MaasEnv:
 
     @staticmethod
     def _overlay_command(
-        subcommand: str, config: str, method: str, workdir: str = "/work"
+        subcommand: str, config: str, method: InstallType, workdir: str = "/work"
     ) -> str:
         """Build the in-container shell command that runs the overlay tool.
 
         Runs from `workdir` (must be on the container rootfs) so the tool's
         relative `.overlayfs_workdir` shares a filesystem with the
         `/work/src/...` upperdirs. `method` selects the package section:
-        '--snap' (default) or '--deb'.
+        '--snap' or '--deb'.
         """
         return (
             f"cd {workdir} && python3 {OVERLAY_SCRIPT} {subcommand} "
             f"--config {config} --{method}"
         )
 
-    @staticmethod
-    def _restart_command(method: str) -> str:
+    @classmethod
+    def _restart_command(cls, method: InstallType) -> str:
         """Command to restart MAAS after (un)overlaying, per install method."""
-        if method == "deb":
-            return "sudo systemctl restart 'maas-*'"
-        return "sudo snap restart maas"
+        return cls._RESTART_COMMANDS[method]
 
     @staticmethod
     def _rsync_command(source: str, container: str, dest: str, rsh: str) -> list[str]:
@@ -421,15 +484,14 @@ class MaasEnv:
         for pattern in EXCLUDES:
             cmd += ["--exclude", pattern]
         cmd += ["-e", rsh]
-        dest_spec = f"{container}:{dest.rstrip('/')}/"
-        cmd += [source, dest_spec]
+        cmd += [source, f"{container}:{dest.rstrip('/')}/"]
         return cmd
 
     def setup_postgres(self, container: str) -> str:
         """Install and configure PostgreSQL on a container. Return its IP."""
         log.info("[postgres] Installing PostgreSQL on %s", container)
         self.lxd.exec(container, "/scripts/postgres-setup.sh")
-        db_ip = self.lxd.exec_capture(container, "hostname -I | cut -d' ' -f1")
+        db_ip = self.lxd.node_ip(container)
         log.info("[postgres] DB IP: %s", db_ip)
         return db_ip
 
@@ -441,10 +503,12 @@ class MaasEnv:
         db_ip: str | None = None,
     ) -> None:
         """Install MAAS on all nodes via maas-install.sh for the given method."""
-        log.info("[%s] Installing and initializing MAAS on all nodes", install.type_)
+        log.info(
+            "[%s] Installing and initializing MAAS on all nodes", install.install_type
+        )
         cmd = install.invocation(db_ip)
-        for c in containers:
-            self.lxd.exec(c, cmd)
+        for container in containers:
+            self.lxd.exec(container, cmd)
 
     def create_admin(self, container: str) -> None:
         """Create admin user and login on the first container."""
@@ -459,6 +523,27 @@ class MaasEnv:
             "$(sudo maas apikey --username maas)",
         )
 
+    @staticmethod
+    def _resolve_targets(
+        script: ScriptTarget, containers: list[str], label: str
+    ) -> list[str] | None:
+        """Return the containers a script targets, or None if unavailable.
+
+        `containers` is ordered, so nodeN maps to index N-1.
+        """
+        if script.target is NodeTarget.ALL:
+            return list(containers)
+        index = int(script.target.removeprefix("node")) - 1
+        if index < len(containers):
+            return [containers[index]]
+        log.warning(
+            "  [%s] skipping %s:%s (container does not exist)",
+            label,
+            script.path,
+            script.target,
+        )
+        return None
+
     def run_scripts(
         self,
         containers: list[str],
@@ -467,110 +552,69 @@ class MaasEnv:
         *,
         abort_on_failure: bool,
     ) -> None:
-        """Run user-provided scripts on specified containers.
+        """Run user-provided scripts on their target containers.
 
         Args:
-            containers: List of container names (e.g. ['mytest-1', 'mytest-2', 'mytest-3'])
-            scripts: List of (path, target) pairs
-            label: Human label for log output (e.g. "pre-install")
-            abort_on_failure: If True, exit on first failure. If False, warn and continue.
+            containers: Ordered container names (e.g. ['t-1', 't-2', 't-3']).
+            scripts: Scripts and the nodes they target.
+            label: Human label for log output (e.g. "pre-install").
+            abort_on_failure: If True, exit on first failure; else warn and continue.
         """
-        if not scripts:
-            return
-
-        for st in scripts:
-            target_containers: list[str]
-            match st.target:
-                case "all":
-                    target_containers = list(containers)
-                case "node1":
-                    target_containers = [containers[0]]
-                case "node2":
-                    if len(containers) >= 2:
-                        target_containers = [containers[1]]
-                    else:
-                        log.warning(
-                            "  [%s] skipping %s:node2 (container does not exist)",
-                            label,
-                            st.path,
-                        )
-                        continue
-                case "node3":
-                    if len(containers) >= 3:
-                        target_containers = [containers[2]]
-                    else:
-                        log.warning(
-                            "  [%s] skipping %s:node3 (container does not exist)",
-                            label,
-                            st.path,
-                        )
-                        continue
-                case _:
-                    log.error(
-                        "  [%s] unknown target '%s' — skipping",
+        for script in scripts:
+            targets = self._resolve_targets(script, containers, label)
+            if targets is None:
+                continue
+            for container in targets:
+                log.info("  [%s] running %s on %s", label, script.path, container)
+                result = self.lxd.exec(
+                    container, script.path, check=abort_on_failure
+                )
+                if result.returncode != 0:
+                    log.warning(
+                        "  [%s] WARNING: %s on %s failed (exit code %d)",
                         label,
-                        st.target,
+                        script.path,
+                        container,
+                        result.returncode,
                     )
-                    continue
 
-            for c in target_containers:
-                log.info("  [%s] running %s on %s", label, st.path, c)
-                try:
-                    result = self.lxd.exec(c, st.path, check=abort_on_failure)
-                    if not abort_on_failure and result.returncode != 0:
-                        log.warning(
-                            "  [%s] WARNING: %s on %s failed (exit code %d)",
-                            label,
-                            st.path,
-                            c,
-                            result.returncode,
-                        )
-                except SystemExit:
-                    raise
-
-    def create(
-        self,
-        name: str,
-        mode: str,
-        containers: list[str],
-        ubuntu: str,
-        profile: str,
-        pre_scripts: list[ScriptTarget],
-        post_scripts: list[ScriptTarget],
-        install: Install,
-    ) -> None:
-        network = f"{name}-net"
-
+    def create(self, spec: EnvironmentSpec, install: Install) -> None:
+        containers = containers_for(spec.name, spec.mode)
         log.info(
             "=== Creating MAAS environment: %s (%s, %d nodes) ===",
-            name,
-            mode,
+            spec.name,
+            spec.mode,
             len(containers),
         )
 
-        self.lxd.create_network(name)
-
-        profile_path = Path(profile)
+        profile_path = Path(spec.profile)
         if not profile_path.exists():
-            log.error("ERROR: profile not found: %s", profile)
+            log.error("ERROR: profile not found: %s", spec.profile)
             sys.exit(1)
 
-        self.lxd.create_containers(containers, ubuntu, str(profile_path), network)
+        self.lxd.create_network(spec.name)
+        self.lxd.create_containers(
+            containers, spec.ubuntu, str(profile_path), f"{spec.name}-net"
+        )
 
         self.registry.add(
             Env(
-                name=name,
-                mode=mode,
-                type_=install.type_,
+                name=spec.name,
+                mode=spec.mode,
+                install_type=install.install_type,
                 maas_channel=install.registry_channel,
             )
         )
 
         log.info("[init] Waiting for cloud-init to finish on all nodes...")
-        for c in containers:
-            self.lxd.exec(c, "cloud-init status --wait > /dev/null 2>&1 || true")
+        for container in containers:
+            self.lxd.exec(
+                container, "cloud-init status --wait > /dev/null 2>&1 || true"
+            )
 
-        self.run_scripts(containers, pre_scripts, "pre-install", abort_on_failure=True)
+        self.run_scripts(
+            containers, spec.pre_scripts, "pre-install", abort_on_failure=True
+        )
 
         if install.provisions_own_db:
             self.install_maas(containers, install)
@@ -583,10 +627,10 @@ class MaasEnv:
         self.create_admin(containers[0])
 
         self.run_scripts(
-            containers, post_scripts, "post-install", abort_on_failure=False
+            containers, spec.post_scripts, "post-install", abort_on_failure=False
         )
 
-        log.info("=== MAAS environment '%s' ready ===", name)
+        log.info("=== MAAS environment '%s' ready ===", spec.name)
         log.info("  Containers: %s", ", ".join(containers))
         log.info("  MAAS URL:   http://%s:5240/MAAS", maas_ip)
         log.info("  Admin:      maas / maas")
@@ -595,9 +639,7 @@ class MaasEnv:
         log.info("=== Destroying MAAS environment: %s ===", name)
 
         self.lxd.delete_containers(containers)
-
         self.lxd.delete_network(name)
-
         self.registry.delete(name)
 
         log.info("=== MAAS environment '%s' destroyed ===", name)
@@ -617,15 +659,41 @@ class MaasEnv:
         header = f"{'NAME':<20} {'MODE':<8} {'TYPE':<6} {'CHANNEL':<16} CREATED"
         log.info(header)
         log.info("-" * len(header))
-        for e in envs:
+        for env in envs:
             log.info(
                 "%-20s %-8s %-6s %-16s %s",
-                e.name,
-                e.mode,
-                e.type_,
-                e.maas_channel or "-",
-                e.created_at,
+                env.name,
+                env.mode,
+                env.install_type,
+                env.maas_channel or "-",
+                env.created_at,
             )
+
+    def status(self, name: str, mode: Mode, containers: list[str]) -> None:
+        """Print container state, MAAS URL, and overlay state for an environment."""
+        log.info("Environment : %s", name)
+        log.info("Mode        : %s", mode)
+        log.info("")
+        for container in containers:
+            running = self.lxd.is_container_running(container)
+            log.info(
+                "  Container : %s  [%s]",
+                container,
+                "RUNNING" if running else "STOPPED",
+            )
+            if running:
+                log.info(
+                    "  MAAS URL  : http://%s:5240/MAAS", self.lxd.node_ip(container)
+                )
+                log.info("  Overlay   : %s", self._overlay_state(container))
+            log.info("")
+
+    def _overlay_state(self, container: str) -> str:
+        """Report whether any overlay mount is currently applied in a container."""
+        return self.lxd.exec_capture(
+            container,
+            "mount 2>/dev/null | grep -q overlay && echo applied || echo not-applied",
+        )
 
     def sync(self, containers: list[str], source: str, dest: str) -> None:
         """Rsync a host source dir into each container's dest dir via the shim."""
@@ -639,25 +707,27 @@ class MaasEnv:
         rsh = f"{sys.executable} {Path(__file__).resolve()} --rsh-shim"
         failures: list[str] = []
 
-        for c in containers:
-            if not self.dry_run and not self.lxd.is_container_running(c):
-                log.warning("  [sync] %s is missing or not running — skipping", c)
-                failures.append(c)
+        for container in containers:
+            if not self.dry_run and not self.lxd.is_container_running(container):
+                log.warning(
+                    "  [sync] %s is missing or not running - skipping", container
+                )
+                failures.append(container)
                 continue
 
-            cmd = self._rsync_command(source, c, dest, rsh)
+            cmd = self._rsync_command(source, container, dest, rsh)
             result = self.lxd.run(cmd, check=False)
-            if not self.dry_run and result.returncode != 0:
+            if result.returncode != 0:
                 detail = result.stderr.strip()
                 log.warning(
                     "  [sync] rsync to %s failed (exit code %d)%s",
-                    c,
+                    container,
                     result.returncode,
                     f": {detail}" if detail else "",
                 )
-                failures.append(c)
+                failures.append(container)
             else:
-                log.info("  [sync] %s done", c)
+                log.info("  [sync] %s done", container)
 
         if failures:
             log.error("=== Sync finished with failures: %s ===", ", ".join(failures))
@@ -669,47 +739,48 @@ class MaasEnv:
         containers: list[str],
         subcommand: str,
         config: str,
-        method: str = "snap",
+        method: InstallType = InstallType.SNAP,
     ) -> None:
         """Run the overlay tool (sync/unsync) in each container, then restart MAAS."""
         verb = "Overlaying" if subcommand == "sync" else "Removing overlays from"
         log.info(
-            "=== %s %d container(s) (config %s) ===",
-            verb,
-            len(containers),
-            config,
+            "=== %s %d container(s) (config %s) ===", verb, len(containers), config
         )
         cmd = self._overlay_command(subcommand, config, method)
         failures: list[str] = []
 
-        for c in containers:
-            if not self.dry_run and not self.lxd.is_container_running(c):
-                log.warning("  [overlay] %s is missing or not running — skipping", c)
-                failures.append(c)
+        for container in containers:
+            if not self.dry_run and not self.lxd.is_container_running(container):
+                log.warning(
+                    "  [overlay] %s is missing or not running - skipping", container
+                )
+                failures.append(container)
                 continue
 
-            result = self.lxd.exec(c, cmd, check=False)
-            if not self.dry_run and result.returncode != 0:
+            result = self.lxd.exec(container, cmd, check=False)
+            if result.returncode != 0:
                 log.warning(
                     "  [overlay] %s failed on %s (exit code %d)",
                     subcommand,
-                    c,
+                    container,
                     result.returncode,
                 )
-                failures.append(c)
+                failures.append(container)
                 continue
 
-            restart = self.lxd.exec(c, self._restart_command(method), check=False)
-            if not self.dry_run and restart.returncode != 0:
+            restart = self.lxd.exec(
+                container, self._restart_command(method), check=False
+            )
+            if restart.returncode != 0:
                 log.warning(
                     "  [overlay] MAAS restart failed on %s (exit code %d)",
-                    c,
+                    container,
                     restart.returncode,
                 )
-                failures.append(c)
+                failures.append(container)
                 continue
 
-            log.info("  [overlay] %s done", c)
+            log.info("  [overlay] %s done", container)
 
         if failures:
             log.error("=== Overlay finished with failures: %s ===", ", ".join(failures))
@@ -748,14 +819,17 @@ class Command(ABC):
         )
 
     @staticmethod
-    def containers_for(name: str, mode: str) -> list[str]:
-        """Return the container names for a given base name and mode."""
-        if mode == "single":
-            return [name]
-        return [f"{name}-{i}" for i in (1, 2, 3)]
+    def add_container_arg(parser: argparse.ArgumentParser) -> None:
+        """Add --container, used by subcommands that default to the primary node."""
+        parser.add_argument(
+            "--container",
+            default=None,
+            metavar="NAME",
+            help="Target a specific container instead of the primary node",
+        )
 
-    @classmethod
-    def lookup(cls, registry: Registry, name: str) -> tuple[Env | None, list[str]]:
+    @staticmethod
+    def lookup(registry: Registry, name: str) -> tuple[Env | None, list[str]]:
         """Fetch a tracked env's record and container list, logging the outcome.
 
         Falls back to a single 'snap' environment when the name is untracked.
@@ -766,7 +840,7 @@ class Command(ABC):
                 "[registry] using recorded settings for '%s' (mode=%s, type=%s)",
                 name,
                 record.mode,
-                record.type_,
+                record.install_type,
             )
             mode = record.mode
         else:
@@ -774,8 +848,8 @@ class Command(ABC):
                 "[registry] '%s' is not tracked; assuming mode=single, type=snap",
                 name,
             )
-            mode = "single"
-        return record, cls.containers_for(name, mode)
+            mode = Mode.SINGLE
+        return record, containers_for(name, mode)
 
 
 class CreateCommand(Command):
@@ -786,12 +860,13 @@ class CreateCommand(Command):
         installs = parser.add_subparsers(dest="install_type", metavar="INSTALL_TYPE")
         installs.required = True
 
-        p_snap = installs.add_parser("snap", help="Install MAAS from the snap")
+        p_snap = installs.add_parser(InstallType.SNAP, help="Install MAAS from the snap")
         self._add_create_args(p_snap)
         p_snap.add_argument(
             "--mode",
-            choices=["single", "multi"],
-            default="single",
+            type=Mode,
+            choices=list(Mode),
+            default=Mode.SINGLE,
             help="Deployment mode (default: single). Recorded in the registry "
             "and reused by later commands for this name.",
         )
@@ -802,7 +877,7 @@ class CreateCommand(Command):
         )
 
         p_deb = installs.add_parser(
-            "deb",
+            InstallType.DEB,
             help="Install MAAS from a deb/PPA (single-node only)",
         )
         self._add_create_args(p_deb)
@@ -818,19 +893,16 @@ class CreateCommand(Command):
         )
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
-        install = self._install_from_args(args)
-        # deb is single-node only, so its subparser omits --mode.
-        mode = getattr(args, "mode", "single")
-        env.create(
+        spec = EnvironmentSpec(
             name=args.name,
-            mode=mode,
-            containers=self.containers_for(args.name, mode),
+            # deb is single-node only, so its subparser omits --mode.
+            mode=getattr(args, "mode", Mode.SINGLE),
             ubuntu=args.ubuntu,
             profile=args.profile,
             pre_scripts=args.pre,
             post_scripts=args.post,
-            install=install,
         )
+        env.create(spec, self._install_from_args(args))
 
     def _add_create_args(self, parser: argparse.ArgumentParser) -> None:
         """Add the arguments common to every install type."""
@@ -866,24 +938,26 @@ class CreateCommand(Command):
 
     @staticmethod
     def _install_from_args(args: argparse.Namespace) -> Install:
-        if args.install_type == "deb":
+        if args.install_type == InstallType.DEB:
             return DebInstall(ppa=args.ppa, branch=args.branch)
         return SnapInstall(channel=args.channel)
 
     @staticmethod
     def _parse_script_arg(raw: str) -> ScriptTarget:
-        """Parse 'path:target' into (path, target). Used as an argparse type."""
+        """Parse 'path:target' into a ScriptTarget. Used as an argparse type."""
+        targets = ", ".join(f"'{t}'" for t in NodeTarget)
         if ":" not in raw:
             raise argparse.ArgumentTypeError(
                 f"invalid script spec '{raw}': expected 'path:target' "
-                f"(target is 'all', 'node1', 'node2', or 'node3')"
+                f"(target is one of {targets})"
             )
         path, target = raw.rsplit(":", 1)
-        if target not in ("all", "node1", "node2", "node3"):
+        try:
+            return ScriptTarget(path=path, target=NodeTarget(target))
+        except ValueError:
             raise argparse.ArgumentTypeError(
-                f"invalid target '{target}': must be 'all', 'node1', 'node2', or 'node3'"
-            )
-        return ScriptTarget(path=path, target=target)
+                f"invalid target '{target}': must be one of {targets}"
+            ) from None
 
 
 class DestroyCommand(Command):
@@ -900,15 +974,18 @@ class DestroyCommand(Command):
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
         _, containers = self.lookup(env.registry, args.name)
-        if not env.dry_run and not args.yes:
-            answer = input(
-                f"Destroy environment '{args.name}'? "
-                "This will delete all containers and the LXD network. [y/N] "
-            )
-            if answer.strip().lower() != "y":
-                log.info("Aborted.")
-                return
+        if not env.dry_run and not args.yes and not self._confirm(args.name):
+            log.info("Aborted.")
+            return
         env.destroy(args.name, containers)
+
+    @staticmethod
+    def _confirm(name: str) -> bool:
+        answer = input(
+            f"Destroy environment '{name}'? "
+            "This will delete all containers and the LXD network. [y/N] "
+        )
+        return answer.strip().lower() == "y"
 
 
 class ListCommand(Command):
@@ -986,6 +1063,14 @@ class OverlayCommand(Command):
         ("remove", "Remove overlay mounts, then restart MAAS"),
     )
 
+    # Channel prefix -> overlay config file, used when --config is omitted.
+    _CONFIG_BY_CHANNEL_PREFIX = {
+        "3.7": "overlay-config-37.yaml",
+        "master": "overlay-config-master.yaml",
+        "main": "overlay-config-master.yaml",
+        "latest": "overlay-config-master.yaml",
+    }
+
     def configure(self, parser: argparse.ArgumentParser) -> None:
         actions = parser.add_subparsers(dest="overlay_action", metavar="ACTION")
         actions.required = True
@@ -994,7 +1079,6 @@ class OverlayCommand(Command):
             self.add_env_args(p)
             p.add_argument(
                 "--config",
-                required=False,
                 default=None,
                 metavar="PATH",
                 help="Path to the overlay config YAML (must live inside this repo). "
@@ -1003,72 +1087,70 @@ class OverlayCommand(Command):
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
         record, containers = self.lookup(env.registry, args.name)
-        method = record.type_ if record is not None else "snap"
-        repo_root = str(Path(__file__).resolve().parent)
-        if args.config and args.config.strip():
-            config = self._config_in_container(args.config)
-        else:
-            channel = record.maas_channel if record is not None else None
-            if not channel:
+        method = record.install_type if record is not None else InstallType.SNAP
+        host_config = self._host_config(args.config, record)
+        subcommand = "sync" if args.overlay_action == "apply" else "unsync"
+        env.overlay(containers, subcommand, self._in_container(host_config), method)
+
+    @classmethod
+    def _host_config(cls, config_arg: str | None, record: Env | None) -> str:
+        """Resolve the host-side overlay config, explicit or auto-selected."""
+        if config_arg and config_arg.strip():
+            host_config = os.path.expanduser(config_arg)
+            if not os.path.isfile(host_config):
                 log.error(
-                    "ERROR: --config is required (environment has no recorded channel)"
+                    "ERROR: overlay config not found or not a file: %s", config_arg
                 )
                 sys.exit(1)
-            try:
-                host_config = self._channel_to_overlay_config(channel, repo_root)
-                log.info("[overlay] Auto-selected config: %s", host_config)
-            except ValueError as exc:
-                log.error("ERROR: %s", exc)
-                sys.exit(1)
-            config = self._map_into_repo(host_config, repo_root)
-        subcommand = "sync" if args.overlay_action == "apply" else "unsync"
-        env.overlay(containers, subcommand, config, method)
+            return host_config
 
-    @staticmethod
-    def _channel_to_overlay_config(channel: str, repo_root: str) -> str:
-        """Map a MAAS channel string to the appropriate overlay config file path.
+        channel = record.maas_channel if record is not None else None
+        if not channel:
+            log.error(
+                "ERROR: --config is required (environment has no recorded channel)"
+            )
+            sys.exit(1)
+        try:
+            host_config = cls._config_for_channel(channel, cls._repo_root())
+        except ValueError as exc:
+            log.error("ERROR: %s", exc)
+            sys.exit(1)
+        log.info("[overlay] Auto-selected config: %s", host_config)
+        return host_config
 
-        Rules:
-        - Channel starting with '3.7' → overlay-config-37.yaml
-        - Channel starting with 'master', 'main', or 'latest' → overlay-config-master.yaml
-        - Otherwise raise ValueError with a helpful message.
-        """
+    @classmethod
+    def _config_for_channel(cls, channel: str, repo_root: str) -> str:
+        """Map a MAAS channel to its overlay config path inside the repo."""
         prefix = channel.split("/")[0].strip()
-        if prefix == "3.7":
-            name = "overlay-config-37.yaml"
-        elif prefix in ("master", "main", "latest"):
-            name = "overlay-config-master.yaml"
-        else:
+        name = cls._CONFIG_BY_CHANNEL_PREFIX.get(prefix)
+        if name is None:
             raise ValueError(
-                f"Cannot auto-select overlay config for channel '{channel}'. "
+                f"cannot auto-select overlay config for channel '{channel}'. "
                 f"Pass --config explicitly."
             )
         path = os.path.join(repo_root, name)
         if not os.path.isfile(path):
             raise ValueError(
-                f"Auto-selected overlay config '{name}' for channel '{channel}' "
+                f"auto-selected overlay config '{name}' for channel '{channel}' "
                 f"does not exist at {path}. Pass --config explicitly."
             )
         return path
 
     @classmethod
-    def _config_in_container(cls, config_arg: str) -> str:
-        """Validate the host overlay config and map it to its in-container path."""
-        host_config = os.path.expanduser(config_arg)
-        if not os.path.isfile(host_config):
-            log.error("ERROR: overlay config not found or not a file: %s", config_arg)
-            sys.exit(1)
-        repo_root = str(Path(__file__).resolve().parent)
+    def _in_container(cls, host_config: str) -> str:
+        """Map the host overlay config to its in-container path, or exit."""
         try:
-            return cls._map_into_repo(host_config, repo_root)
+            return cls._map_into_repo(host_config, cls._repo_root())
         except ValueError as exc:
             log.error("ERROR: %s", exc)
             sys.exit(1)
 
     @staticmethod
-    def _map_into_repo(
-        host_config: str, repo_root: str, mount: str = "/scripts"
-    ) -> str:
+    def _repo_root() -> str:
+        return str(Path(__file__).resolve().parent)
+
+    @staticmethod
+    def _map_into_repo(host_config: str, repo_root: str, mount: str = "/scripts") -> str:
         """Map a host overlay-config path to its path inside a container.
 
         The repo is bind-mounted at `mount` (default /scripts) in every
@@ -1094,96 +1176,97 @@ class StatusCommand(Command):
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
         record, containers = self.lookup(env.registry, args.name)
-        log.info("Environment : %s", args.name)
-        log.info("Mode        : %s", record.mode if record else "single")
-        log.info("")
-        for c in containers:
-            running = env.lxd.is_container_running(c)
-            status_str = "RUNNING" if running else "STOPPED"
-            log.info("  Container : %s  [%s]", c, status_str)
-            if running:
-                result = subprocess.run(
-                    ["lxc", "exec", c, "--", "hostname", "-I"],
-                    text=True, capture_output=True,
-                )
-                ip = result.stdout.strip().split()[0] if result.stdout.strip() else "unknown"
-                log.info("  MAAS URL  : http://%s:5240/MAAS", ip)
-                ov = subprocess.run(
-                    ["lxc", "exec", c, "--", "sh", "-c",
-                     "mount 2>/dev/null | grep -q overlay && echo applied || echo not-applied"],
-                    text=True, capture_output=True,
-                )
-                overlay_state = ov.stdout.strip() if ov.returncode == 0 else "unknown"
-                log.info("  Overlay   : %s", overlay_state)
-            log.info("")
+        mode = record.mode if record is not None else Mode.SINGLE
+        env.status(args.name, mode, containers)
 
 
 class LogsCommand(Command):
     name = "logs"
-    help = "Tail MAAS service logs from the primary container"
+    help = "Tail MAAS service logs from a container"
+
+    # The systemd unit that carries the MAAS logs, per install method.
+    _UNITS = {
+        InstallType.SNAP: "snap.maas.supervisor",
+        InstallType.DEB: "maas-regiond",
+    }
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         self.add_env_args(parser)
-        parser.add_argument("--container", default=None, help="Target a specific container")
+        self.add_container_arg(parser)
         parser.add_argument(
-            "--deb", action="store_true",
-            help="Use deb service name (maas-regiond) instead of snap",
+            "--lines",
+            type=int,
+            default=100,
+            metavar="N",
+            help="Number of history lines to show before following (default: 100)",
         )
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
         record, containers = self.lookup(env.registry, args.name)
         container = args.container or containers[0]
-        unit = "maas-regiond" if args.deb else "snap.maas.supervisor"
+        install_type = record.install_type if record is not None else InstallType.SNAP
+        unit = self._UNITS[install_type]
         log.info("[logs] Tailing %s on %s (Ctrl-C to stop)", unit, container)
-        os.execvp(
-            "lxc",
-            ["lxc", "exec", container, "--",
-             "journalctl", "-u", unit, "-f", "-n", "100"],
+        env.lxd.exec_replace(
+            container, ["journalctl", "-u", unit, "-f", "-n", str(args.lines)]
         )
 
 
 class ExecCommand(Command):
     name = "exec"
-    help = "Run a command in the primary container of an environment"
+    help = "Run a command in an environment's containers"
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         self.add_env_args(parser)
-        parser.add_argument("--container", default=None, help="Target a specific container")
+        self.add_container_arg(parser)
         parser.add_argument(
-            "--all", action="store_true",
-            help="Run in all containers (multi mode)",
+            "--all",
+            action="store_true",
+            help="Run in every container of the environment",
         )
-        parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
+        # nargs="*" (not REMAINDER, which would swallow this subcommand's own
+        # options). dest is not "command": that name is taken by the top-level
+        # subparser. Separate the command with `--` so its flags reach it.
+        parser.add_argument(
+            "argv",
+            nargs="*",
+            metavar="COMMAND",
+            help="Command to run, e.g. `-- systemctl status maas-regiond`",
+        )
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
-        record, containers = self.lookup(env.registry, args.name)
-        if not args.command:
+        if not args.argv:
             log.error("ERROR: COMMAND is required")
             sys.exit(1)
+        if args.all and args.container:
+            log.error("ERROR: --all and --container are mutually exclusive")
+            sys.exit(1)
+
+        _, containers = self.lookup(env.registry, args.name)
         targets = containers if args.all else [args.container or containers[0]]
-        failed = False
-        for c in targets:
-            log.info("[exec] %s: %s", c, " ".join(args.command))
-            result = subprocess.run(["lxc", "exec", c, "--"] + args.command)
-            if result.returncode != 0:
-                failed = True
-        if failed:
+        failures: list[str] = []
+        for container in targets:
+            log.info("[exec] %s: %s", container, " ".join(args.argv))
+            if env.lxd.exec_passthrough(container, args.argv) != 0:
+                failures.append(container)
+        if failures:
+            log.error("[exec] failed on: %s", ", ".join(failures))
             sys.exit(1)
 
 
 class ShellCommand(Command):
     name = "shell"
-    help = "Open an interactive bash shell in the primary container"
+    help = "Open an interactive bash shell in a container"
 
     def configure(self, parser: argparse.ArgumentParser) -> None:
         self.add_env_args(parser)
-        parser.add_argument("--container", default=None, help="Target a specific container")
+        self.add_container_arg(parser)
 
     def execute(self, args: argparse.Namespace, env: MaasEnv) -> None:
-        record, containers = self.lookup(env.registry, args.name)
+        _, containers = self.lookup(env.registry, args.name)
         container = args.container or containers[0]
         log.info("[shell] Opening shell in %s", container)
-        os.execvp("lxc", ["lxc", "exec", container, "--", "bash"])
+        env.lxd.exec_replace(container, ["bash"])
 
 
 class CLI:
@@ -1204,7 +1287,8 @@ class CLI:
 
     def build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
-            description="Create and destroy MAAS environments in LXD, and drive a fast edit→sync→overlay inner loop.",
+            description="Create and destroy MAAS environments in LXD, and drive a "
+            "fast edit/sync/overlay inner loop.",
         )
         sub = parser.add_subparsers(dest="command", metavar="COMMAND")
         sub.required = True
@@ -1239,18 +1323,17 @@ class CLI:
     def _shim_exec_argv(shim_args: list[str]) -> list[str]:
         """Translate rsync's '<container> <remote-cmd...>' into an lxc exec argv.
 
-        Runs the container-side command as uid/gid 1000 (ubuntu) so synced files
-        keep the ownership maas-install.sh sets on /work.
+        Runs the container-side command as the container's ubuntu user so synced
+        files keep the ownership maas-install.sh sets on /work.
         """
-        container = shim_args[0]
-        remote_cmd = shim_args[1:]
+        container, *remote_cmd = shim_args
         return [
             "lxc",
             "exec",
             "--user",
-            "1000",
+            str(CONTAINER_UID),
             "--group",
-            "1000",
+            str(CONTAINER_GID),
             container,
             "--",
             *remote_cmd,

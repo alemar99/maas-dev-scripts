@@ -19,9 +19,13 @@ The centrepiece is `maas-env.py`, a CLI that spins up full MAAS environments ins
   - [sync](#sync)
   - [overlay apply](#overlay-apply)
   - [overlay remove](#overlay-remove)
+  - [status](#status)
+  - [logs](#logs)
+  - [exec](#exec)
+  - [shell](#shell)
 - [Supporting Scripts](#supporting-scripts)
 - [Configuration Files](#configuration-files)
-- [Real-World Use Cases](#real-world-use-cases)
+- [Environment Registry](#environment-registry)
 - [Running the Tests](#running-the-tests)
 
 ---
@@ -94,9 +98,15 @@ commands:
   sync          Rsync a host source tree into environment containers
   overlay apply  Mount source over installed MAAS paths
   overlay remove Unmount source overlays
+  status        Show container state, MAAS URL, and overlay state
+  logs          Tail the MAAS service logs from a container
+  exec          Run a command in an environment's containers
+  shell         Open an interactive shell in a container
 ```
 
-All commands accept `--dry-run` to print what would happen without executing.
+Apart from `list`, every command takes only the environment `NAME`: mode, install
+type, and channel are recorded in the registry at create time and looked up from
+there. All commands accept `--dry-run` to print what would happen without executing.
 
 ---
 
@@ -172,16 +182,17 @@ Options:
 
 ### destroy
 
-Stops and deletes all containers belonging to an environment, and removes the associated LXD network.
+Stops and deletes all containers belonging to an environment, and removes the associated LXD network. Prompts for confirmation unless `--yes` is given.
 
 ```
-./maas-env.py destroy NAME [--dry-run]
+./maas-env.py destroy NAME [--yes] [--dry-run]
 ```
 
 **Examples:**
 
 ```bash
 ./maas-env.py destroy dev1
+./maas-env.py destroy dev1 --yes           # no confirmation prompt
 ./maas-env.py destroy cluster1 --dry-run   # preview teardown steps
 ```
 
@@ -245,16 +256,22 @@ Syncing into a multi-node environment pushes to all three containers in parallel
 Mounts your synced source tree over the installed MAAS Python packages using overlayFS (or bind mounts for single files). MAAS is restarted automatically so changes take effect immediately.
 
 ```
-./maas-env.py overlay apply NAME --config PATH [--dry-run]
+./maas-env.py overlay apply NAME [--config PATH] [--dry-run]
 
 Arguments:
   NAME        Environment name
-  --config    Path to the overlay config YAML (must be inside this repo)
+  --config    Path to the overlay config YAML (must be inside this repo).
+              Auto-selected from the environment's recorded MAAS channel when
+              omitted: 3.7/* -> overlay-config-37.yaml, latest|master|main/* ->
+              overlay-config-master.yaml
 ```
 
 **Examples:**
 
 ```bash
+# Config auto-selected from the channel recorded at create time
+./maas-env.py overlay apply dev37
+
 # Apply overlays for a 3.7 snap environment
 ./maas-env.py overlay apply dev37 --config overlay-config-37.yaml
 
@@ -272,13 +289,61 @@ Arguments:
 Unmounts all overlays and reverts MAAS to the stock installed files. MAAS is restarted.
 
 ```
-./maas-env.py overlay remove NAME --config PATH [--dry-run]
+./maas-env.py overlay remove NAME [--config PATH] [--dry-run]
 ```
 
 **Examples:**
 
 ```bash
+./maas-env.py overlay remove dev37
 ./maas-env.py overlay remove dev37 --config overlay-config-37.yaml
+```
+
+---
+
+### status
+
+Shows, for each container of an environment, whether it is running, its MAAS URL, and whether overlays are currently applied.
+
+```
+./maas-env.py status NAME
+```
+
+---
+
+### logs
+
+Tails the MAAS service logs from a container. The systemd unit is chosen from the environment's recorded install type (`snap.maas.supervisor` for snap, `maas-regiond` for deb).
+
+```
+./maas-env.py logs NAME [--container NAME] [--lines N]
+```
+
+---
+
+### exec
+
+Runs a command inside an environment's containers. Defaults to the primary node; use `--all` for every node. Separate the container-side command with `--` so its own flags are not consumed by `maas-env.py`.
+
+```
+./maas-env.py exec NAME [--container NAME | --all] -- COMMAND [ARGS...]
+```
+
+**Examples:**
+
+```bash
+./maas-env.py exec dev37 -- systemctl status maas-regiond
+./maas-env.py exec cluster1 --all -- snap list maas
+```
+
+---
+
+### shell
+
+Opens an interactive bash shell in a container (the primary node by default).
+
+```
+./maas-env.py shell NAME [--container NAME]
 ```
 
 ---
@@ -338,3 +403,15 @@ Use with: `./maas-env.py overlay apply myenv --config overlay-config-master.yaml
 ## Environment Registry
 
 Environments are persisted to `~/.local/share/maas-env/environments.db` (SQLite). This is how `destroy` and `list` know about previously created environments across shell sessions.
+
+Every environment is recorded at create time with its mode, install type, and MAAS channel. That is why all other subcommands take only `NAME`: they read those settings back from the registry rather than making you repeat them.
+
+---
+
+## Running the Tests
+
+The test suite covers the pure logic of `maas-env.py` (command construction, path mapping, argument parsing) and needs no LXD and no third-party dependencies.
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
