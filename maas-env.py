@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
+import textwrap
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -81,6 +83,29 @@ def containers_for(name: str, mode: Mode) -> list[str]:
 class ScriptTarget(NamedTuple):
     path: str
     target: NodeTarget
+
+
+class NetworkInfo(NamedTuple):
+    """A managed LXD network and its auto-assigned IPv4 subnet.
+
+    LXD DHCP is disabled on this network (MAAS runs its own), so containers get
+    static IPs derived from `gateway`/`prefixlen` via cloud-init.
+    """
+
+    name: str
+    gateway: str
+    prefixlen: int
+
+    def host_ip(self, index: int) -> str:
+        """Return a stable static host IP for the Nth container in the subnet.
+
+        Containers are placed at gateway-base + 10 + index (e.g. a /24 with
+        gateway .1 yields .10, .11, .12), well clear of the gateway itself.
+        """
+        network = ipaddress.ip_network(
+            f"{self.gateway}/{self.prefixlen}", strict=False
+        )
+        return str(network.network_address + 10 + index)
 
 
 @dataclass
@@ -359,13 +384,48 @@ class Lxd:
         """Return the container's primary IP address."""
         return self.exec_capture(container, "hostname -I | cut -d' ' -f1")
 
-    def create_network(self, name: str) -> None:
-        """Create an LXD managed network."""
+    def create_network(self, name: str) -> NetworkInfo:
+        """Create an LXD managed network with DHCP disabled.
+
+        MAAS runs its own DHCP server on this subnet; LXD's managed dnsmasq DHCP
+        would fight it, so we turn LXD DHCP off (v4 and v6) and disable IPv6
+        entirely. dnsmasq keeps serving DNS on the gateway and NAT stays on, so
+        the containers still reach the internet once they have a static IP.
+        """
         network = f"{name}-net"
         log.info("[net] Creating LXD network %s", network)
         result = self.run(["lxc", "network", "create", network], check=False)
         if result.returncode != 0:
             log.info("  (network already exists, skipping)")
+
+        log.info("[net] Disabling LXD-managed DHCP on %s", network)
+        self.run(["lxc", "network", "set", network, "ipv4.dhcp", "false"])
+        self.run(["lxc", "network", "set", network, "ipv6.dhcp", "false"])
+        self.run(["lxc", "network", "set", network, "ipv6.address", "none"])
+
+        gateway, prefixlen = self._network_subnet(network)
+        log.info(
+            "[net] %s subnet %s/%d (gateway %s), DHCP off",
+            network,
+            gateway,
+            prefixlen,
+            gateway,
+        )
+        return NetworkInfo(name=network, gateway=gateway, prefixlen=prefixlen)
+
+    def _network_subnet(self, network: str) -> tuple[str, int]:
+        """Read a managed network's IPv4 gateway address and prefix length."""
+        if self.dry_run:
+            # No live network to query; return a representative subnet so the
+            # rest of the dry-run (static IP assignment) has something to show.
+            return "10.0.0.1", 24
+        result = self.run(["lxc", "network", "get", network, "ipv4.address"])
+        cidr = result.stdout.strip()
+        if not cidr:
+            log.error("could not read ipv4.address for network %s", network)
+            sys.exit(1)
+        iface = ipaddress.ip_interface(cidr)
+        return str(iface.ip), iface.network.prefixlen
 
     def delete_network(self, name: str) -> None:
         """Delete an LXD managed network."""
@@ -380,15 +440,20 @@ class Lxd:
         containers: list[str],
         ubuntu: str,
         profile: str,
-        network: str | None,
+        network: NetworkInfo | None,
     ) -> None:
-        """Launch and start LXD containers."""
+        """Launch and start LXD containers.
+
+        When a `network` is given its DHCP is disabled, so each container is
+        assigned a static IP via cloud-init before it first boots.
+        """
         image = f"ubuntu:{ubuntu}"
-        for container in containers:
+        for index, container in enumerate(containers):
             self._init_container(container, image, profile)
             self._set_idmap(container)
             if network:
-                self._attach_network(container, network)
+                self._attach_network(container, network.name)
+                self._set_network_config(container, network, index)
 
         for container in containers:
             log.info("[container] Starting %s", container)
@@ -429,6 +494,46 @@ class Lxd:
                 "nic",
                 f"network={network}",
             ]
+        )
+
+    def _set_network_config(
+        self, container: str, network: NetworkInfo, index: int
+    ) -> None:
+        """Assign a static IP via cloud-init (LXD DHCP is disabled on the net).
+
+        Must run before the container's first boot so cloud-init applies it.
+        """
+        ip = network.host_ip(index)
+        log.info("[container] Assigning static IP %s/%d to %s", ip, network.prefixlen, container)
+        config = self._render_network_config(ip, network.prefixlen, network.gateway)
+        cmd = ["lxc", "config", "set", container, "user.network-config", "-"]
+        if self.dry_run:
+            self._log_dry(cmd)
+            return
+        result = subprocess.run(cmd, input=config, text=True, capture_output=True)
+        self._fail_on_error(result)
+
+    @staticmethod
+    def _render_network_config(ip: str, prefixlen: int, gateway: str) -> str:
+        """Render a cloud-init v2 network-config for a single static-IP NIC.
+
+        DNS points at the gateway, where LXD's dnsmasq keeps forwarding queries
+        (and NATs traffic to the internet) even with DHCP disabled.
+        """
+        return textwrap.dedent(
+            f"""\
+            version: 2
+            ethernets:
+              eth0:
+                addresses:
+                  - {ip}/{prefixlen}
+                routes:
+                  - to: default
+                    via: {gateway}
+                nameservers:
+                  addresses:
+                    - {gateway}
+            """
         )
 
     def delete_containers(self, containers: list[str]) -> None:
@@ -1073,8 +1178,7 @@ class OverlayCommand(Command):
     # packaging after 3.8 (snap-only from then on).
     _CONFIG_BY_CHANNEL_PREFIX = {
         "3.7": "overlay-config-37.yaml",
-        "master": "overlay-config-master.yaml",
-        "main": "overlay-config-master.yaml",
+        "3.8": "overlay-config-38.yaml",
         "latest": "overlay-config-master.yaml",
     }
 

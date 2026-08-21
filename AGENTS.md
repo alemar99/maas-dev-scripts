@@ -28,6 +28,8 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 ## Sharp edges
 
+- `create` disables LXD-managed DHCP on the environment network (`ipv4.dhcp=false`, `ipv6.dhcp=false`, `ipv6.address=none`) so LXD's dnsmasq doesn't fight the DHCP server MAAS runs on the same subnet. Because LXD hands out static NIC IPs *through* that DHCP server, disabling it means containers get their IP from a per-container cloud-init v2 network-config instead (`Lxd._set_network_config`), derived from the network's auto-assigned subnet (gateway `.1` -> nodes `.10/.11/.12`). dnsmasq still forwards DNS and NAT stays on, so pointing `nameservers` at the gateway keeps internet access working.
+
 - `postgres-setup.sh` is idempotent (uses conditional SQL), safe to run twice.
 - `base_candid_rbac_setup.sh` dynamically detects the installed PostgreSQL version via `ls /etc/postgresql`; do not add hardcoded version symlinks.
 - `overlay apply|remove` auto-selects its config from the environment's recorded MAAS channel (3.7/* → overlay-config-37.yaml; 3.8/* → overlay-config-38.yaml; latest/* → overlay-config-master.yaml). Pass `--config` to override; it must live inside the repo, since the repo is what gets bind-mounted at `/scripts`.

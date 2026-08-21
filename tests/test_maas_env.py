@@ -54,6 +54,40 @@ class TestInstallInvocation(unittest.TestCase):
         self.assertIsNone(install.registry_channel)
 
 
+class TestNetworkInfo(unittest.TestCase):
+    def test_host_ip_places_containers_above_the_gateway(self):
+        info = maas_env.NetworkInfo(name="t-net", gateway="10.20.30.1", prefixlen=24)
+        self.assertEqual(info.host_ip(0), "10.20.30.10")
+        self.assertEqual(info.host_ip(1), "10.20.30.11")
+        self.assertEqual(info.host_ip(2), "10.20.30.12")
+
+    def test_host_ip_is_derived_from_the_network_base_not_the_gateway(self):
+        # Gateway happens to be .1, but host IPs are offset from the network
+        # base address (.0 for a /24), so index 0 lands on .10.
+        info = maas_env.NetworkInfo(name="t-net", gateway="192.168.5.1", prefixlen=24)
+        self.assertEqual(info.host_ip(0), "192.168.5.10")
+
+
+class TestRenderNetworkConfig(unittest.TestCase):
+    def _render(self, ip="10.0.0.10", prefixlen=24, gateway="10.0.0.1"):
+        return maas_env.Lxd._render_network_config(ip, prefixlen, gateway)
+
+    def test_declares_the_static_address_with_prefix(self):
+        self.assertIn("- 10.0.0.10/24", self._render())
+
+    def test_routes_default_via_the_gateway(self):
+        rendered = self._render()
+        self.assertIn("to: default", rendered)
+        self.assertIn("via: 10.0.0.1", rendered)
+
+    def test_nameserver_points_at_the_gateway(self):
+        # LXD's dnsmasq keeps forwarding DNS on the gateway with DHCP disabled.
+        self.assertIn("- 10.0.0.1", self._render().split("nameservers")[1])
+
+    def test_is_cloud_init_v2_format(self):
+        self.assertTrue(self._render().startswith("version: 2\n"))
+
+
 class TestRsyncCommand(unittest.TestCase):
     def _command(self, source="/src/", container="c1", dest="/work"):
         return maas_env.MaasEnv._rsync_command(source, container, dest, "RSH")
