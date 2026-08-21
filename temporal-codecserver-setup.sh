@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Clone and build MAAS codec server for Temporal
+# Clone and build the MAAS codec server for Temporal workflow encryption.
+# Runs inside a container (via lxc exec).
+# Requires Go; produces a 'codecserver' binary in the script directory.
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

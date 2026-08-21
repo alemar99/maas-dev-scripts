@@ -1,6 +1,8 @@
 #!/bin/bash
 #
-# Install and configure temporal-ui snap for MAAS
+# Install and configure temporal-ui snap for MAAS.
+# Runs inside a container (via lxc exec).
+# Configures temporal-ui to talk to the MAAS Temporal server.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

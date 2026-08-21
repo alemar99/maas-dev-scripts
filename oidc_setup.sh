@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# OIDC setup, add the missing env vars in oidc_vars.sh
+# Configure OIDC authentication provider for MAAS.
+# Runs inside a container (via lxc exec).
+# Requires oidc_vars.sh to be populated with ISSUER_URL, CLIENT_ID, CLIENT_SECRET.
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source $SCRIPT_DIR/oidc_vars.sh
@@ -13,6 +16,6 @@ maas admin oidc-providers create -k \
     client_id="$CLIENT_ID" \
     client_secret="$CLIENT_SECRET" \
     enabled=true \
-    tokentype=Opaque \
+    token_type="Opaque" \
     redirect_uri="http://$HOST_IP:5240/MAAS/r/login/oidc/callback" \
     scopes='openid profile email offline_access'

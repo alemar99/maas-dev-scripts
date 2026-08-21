@@ -1,6 +1,9 @@
 #!/bin/bash
 #
-# Setup PostgreSQL for MAAS
+# Install and configure PostgreSQL for MAAS.
+# Runs inside a container (via lxc exec).
+# Idempotent: safe to run more than once.
+set -e
 
 sudo apt update
 sudo apt install -y postgresql

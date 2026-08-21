@@ -1,2 +1,5 @@
 rbac_stable.deb
 oidc_vars.sh
+__pycache__/
+*.pyc
+codecserver/

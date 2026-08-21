@@ -1,0 +1,17 @@
+snap:
+  package: maas
+  dirs:
+    /work/src/apiclient: /snap/maas/current/usr/lib/python3.14/dist-packages/apiclient
+    /work/src/maasapiserver: /snap/maas/current/usr/lib/python3.14/dist-packages/maasapiserver
+    /work/src/maascli: /snap/maas/current/usr/lib/python3.14/dist-packages/maascli
+    /work/src/maascommon: /snap/maas/current/usr/lib/python3.14/dist-packages/maascommon
+    /work/src/maasserver: /snap/maas/current/usr/lib/python3.14/dist-packages/maasserver
+    /work/src/maasservicelayer: /snap/maas/current/usr/lib/python3.14/dist-packages/maasservicelayer
+    /work/src/maastemporalworker: /snap/maas/current/usr/lib/python3.14/dist-packages/maastemporalworker
+    /work/src/metadataserver: /snap/maas/current/usr/lib/python3.14/dist-packages/metadataserver
+    /work/src/provisioningserver: /snap/maas/current/usr/lib/python3.14/dist-packages/provisioningserver
+    #/work/src/maasui/build: /snap/maas/current/usr/share/maas/web/static
+    #/work/src/host-info/bin: /snap/maas/current/usr/share/maas/machine-resources
+  #files:
+    #/work/src/maasagent/build/maas-agent: /snap/maas/current/usr/sbin/maas-agent
+    #/work/src/maasagent/build/maas-netmon: /snap/maas/current/usr/sbin/maas-netmon

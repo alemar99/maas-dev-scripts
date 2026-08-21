@@ -1,0 +1,37 @@
+deb:
+  package: maas
+  dirs:
+    /work/src/apiclient: /usr/lib/python3/dist-packages/apiclient
+    /work/src/maasapiserver: /usr/lib/python3/dist-packages/maasapiserver
+    /work/src/maascli: /usr/lib/python3/dist-packages/maascli
+    /work/src/maascommon: /usr/lib/python3/dist-packages/maascommon
+    /work/src/maasserver: /usr/lib/python3/dist-packages/maasserver
+    /work/src/maasservicelayer: /usr/lib/python3/dist-packages/maasservicelayer
+    /work/src/maastemporalworker: /usr/lib/python3/dist-packages/maastemporalworker
+    /work/src/metadataserver: /usr/lib/python3/dist-packages/metadataserver
+    /work/src/provisioningserver: /usr/lib/python3/dist-packages/provisioningserver
+    #/work/src/maasui/build: /usr/share/maas/web/static
+    #/work/src/host-info/bin: /usr/share/maas/machine-resources
+  #files:
+    #/work/src/maasagent/build/maas-agent: /usr/sbin/maas-agent
+    #/work/src/maasagent/build/maas-netmon: /usr/sbin/maas-netmon
+
+snap:
+  package: maas
+  dirs:
+    /work/src/apiclient: /snap/maas/current/lib/python3.12/site-packages/apiclient
+    /work/src/maasapiserver: /snap/maas/current/lib/python3.12/site-packages/maasapiserver
+    /work/src/maascli: /snap/maas/current/lib/python3.12/site-packages/maascli
+    /work/src/maascommon: /snap/maas/current/lib/python3.12/site-packages/maascommon
+    /work/src/maasserver: /snap/maas/current/lib/python3.12/site-packages/maasserver
+    /work/src/maasservicelayer: /snap/maas/current/lib/python3.12/site-packages/maasservicelayer
+    /work/src/maastemporalworker: /snap/maas/current/lib/python3.12/site-packages/maastemporalworker
+    /work/src/metadataserver: /snap/maas/current/lib/python3.12/site-packages/metadataserver
+    /work/src/provisioningserver: /snap/maas/current/lib/python3.12/site-packages/provisioningserver
+    #/work/src/maasserver/templates: /snap/maas/current/lib/python3.12/site-packages/maasserver/templates
+    #/work/src/maasui/build: /snap/maas/current/usr/share/maas/web/static
+    #/work/src/host-info/bin: /snap/maas/current/usr/share/maas/machine-resources
+  #files:
+    #/work/src/maasagent/build/maas-agent: /snap/maas/current/usr/sbin/maas-agent
+    #/work/src/maasagent/build/maas-netmon: /snap/maas/current/usr/sbin/maas-netmon
+
