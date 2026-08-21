@@ -592,9 +592,9 @@ class MaasEnv:
             log.error("ERROR: profile not found: %s", spec.profile)
             sys.exit(1)
 
-        self.lxd.create_network(spec.name)
+        network = self.lxd.create_network(spec.name)
         self.lxd.create_containers(
-            containers, spec.ubuntu, str(profile_path), f"{spec.name}-net"
+            containers, spec.ubuntu, str(profile_path), network
         )
 
         self.registry.add(
@@ -878,7 +878,9 @@ class CreateCommand(Command):
 
         p_deb = installs.add_parser(
             InstallType.DEB,
-            help="Install MAAS from a deb/PPA (single-node only)",
+            # MAAS dropped deb/PPA packaging after 3.8; only relevant for
+            # ppa:maas/3.7 and ppa:maas/3.8 style channels.
+            help="Install MAAS from a deb/PPA (single-node only, MAAS <= 3.8)",
         )
         self._add_create_args(p_deb)
         p_deb.add_argument(
@@ -1064,6 +1066,11 @@ class OverlayCommand(Command):
     )
 
     # Channel prefix -> overlay config file, used when --config is omitted.
+    #
+    # "latest" tracks the tip of development, which moves past whatever the
+    # newest numbered config is (currently 3.8) as new releases branch off.
+    # overlay-config-master.yaml has no deb: section because MAAS dropped deb
+    # packaging after 3.8 (snap-only from then on).
     _CONFIG_BY_CHANNEL_PREFIX = {
         "3.7": "overlay-config-37.yaml",
         "master": "overlay-config-master.yaml",

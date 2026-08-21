@@ -30,6 +30,7 @@ When updating this file, preserve this bar for all agents and keep entries conci
 
 - `postgres-setup.sh` is idempotent (uses conditional SQL), safe to run twice.
 - `base_candid_rbac_setup.sh` dynamically detects the installed PostgreSQL version via `ls /etc/postgresql`; do not add hardcoded version symlinks.
-- `overlay apply|remove` auto-selects its config from the environment's recorded MAAS channel (3.7/* → overlay-config-37.yaml; latest/master/main/* → overlay-config-master.yaml). Pass `--config` to override; it must live inside the repo, since the repo is what gets bind-mounted at `/scripts`.
+- `overlay apply|remove` auto-selects its config from the environment's recorded MAAS channel (3.7/* → overlay-config-37.yaml; 3.8/* → overlay-config-38.yaml; latest/* → overlay-config-master.yaml). Pass `--config` to override; it must live inside the repo, since the repo is what gets bind-mounted at `/scripts`.
+- MAAS dropped deb/PPA packaging after 3.8 (snap-only from then on). `overlay-config-master.yaml` (tracking the tip of development) has no `deb:` section for this reason; `overlay-config-38.yaml` still does, since 3.8 itself still supports deb. `create deb` (--ppa/--branch) is only meaningful for MAAS <= 3.8.
 - `exec` uses `nargs="*"`, not `argparse.REMAINDER` (which swallowed `--all`/`--dry-run`). Separate the container-side command with `--`.
 - `argcomplete` integration is optional (graceful import fallback); enable with `pip install argcomplete && eval "$(register-python-argcomplete maas-env.py)"`.

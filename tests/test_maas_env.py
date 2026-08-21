@@ -160,8 +160,15 @@ class TestOverlayConfigForChannel(unittest.TestCase):
                 msg=channel,
             )
 
+    def test_38_channels_select_the_38_config(self):
+        for channel in ("3.8", "3.8/edge", "3.8/stable"):
+            self.assertTrue(
+                self._config_for(channel).endswith("overlay-config-38.yaml"),
+                msg=channel,
+            )
+
     def test_tip_channels_select_the_master_config(self):
-        for channel in ("latest/edge", "master", "main/stable"):
+        for channel in ("latest/edge", "latest", "latest/stable"):
             self.assertTrue(
                 self._config_for(channel).endswith("overlay-config-master.yaml"),
                 msg=channel,
