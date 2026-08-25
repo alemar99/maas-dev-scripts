@@ -1,17 +1,22 @@
 config:
-    security.nesting: true
-    # don't include pgcli as it will install psycopg3 and will break deb setups
-    user.vendor-data: |
-        #cloud-config
-        packages:
-        - git 
-        - build-essential
-        - jq
-        - rsync
-        - python3-yaml
-        - software-properties-common
+  security.nesting: true
+  # don't include pgcli as it will install psycopg3 and will break deb setups
+  user.vendor-data: |
+    #cloud-config
+    packages:
+    - git 
+    - build-essential
+    - jq
+    - rsync
+    - python3-yaml
+    - software-properties-common
 devices:
-    scripts:
-        type: disk
-        source: /home/alessandro.marcolini@canonical.com/dev/maas-dev-scripts
-        path: /scripts
+  root:
+    path: /
+    pool: default
+    type: disk
+  scripts:
+    type: disk
+    source: /home/alessandro.marcolini@canonical.com/dev/maas-dev-scripts
+    path: /scripts
+project: maas-env
