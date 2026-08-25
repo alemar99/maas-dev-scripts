@@ -50,6 +50,9 @@ OVERLAY_SCRIPT = "/scripts/overlay-mount.py"
 # In-container path to the install script (bind-mounted at /scripts).
 INSTALL_SCRIPT = "/scripts/maas-install.sh"
 
+# LXD project under which all containers and networks are created.
+LXD_PROJECT = "maas-env"
+
 # The `ubuntu` user inside the containers. Host uid/gid are idmapped onto it so
 # bind mounts and rsynced files keep the ownership maas-install.sh expects.
 CONTAINER_UID = 1000
@@ -318,6 +321,39 @@ class Lxd:
             log.error(result.stderr.strip())
             sys.exit(1)
 
+    @staticmethod
+    def _project_args() -> list[str]:
+        """Return `--project maas-env` for every LXD command."""
+        return ["--project", LXD_PROJECT]
+
+    def ensure_project(self) -> None:
+        """Create the maas-env project if it does not exist."""
+        result = self.run(
+            [
+                "lxc",
+                "project",
+                "create",
+                LXD_PROJECT,
+                "--config",
+                "features.images=false",
+                "--config",
+                "features.profiles=true",
+                "--config",
+                "features.storage.volumes=false",
+            ],
+            check=False,
+        )
+        if result.returncode == 0:
+            log.info("[project] Created LXD project %s", LXD_PROJECT)
+        else:
+            if f"Project \"{LXD_PROJECT}\" already exists" in result.stderr:
+                log.info(
+                    "[project] LXD project %s already exists", LXD_PROJECT,
+                )
+            else:
+                log.error("[project] Failed creating the LXD project %s. Stderr: %s", LXD_PROJECT, result.stderr)
+                sys.exit(1)
+
     def run(self, cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
         """Run a host command. If dry_run, print it instead."""
         if self.dry_run:
@@ -333,7 +369,7 @@ class Lxd:
         self, container: str, cmd: str, *, check: bool = True
     ) -> subprocess.CompletedProcess:
         """Run a shell command inside an LXD container."""
-        argv = ["lxc", "exec", container, "--", "sh", "-c", cmd]
+        argv = ["lxc", *self._project_args(), "exec", container, "--", "sh", "-c", cmd]
         if self.dry_run:
             self._log_dry(argv)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -347,7 +383,7 @@ class Lxd:
 
     def exec_capture(self, container: str, cmd: str) -> str:
         """Run a shell command inside a container and return its stdout."""
-        argv = ["lxc", "exec", container, "--", "sh", "-c", cmd]
+        argv = ["lxc", *self._project_args(), "exec", container, "--", "sh", "-c", cmd]
         if self.dry_run:
             self._log_dry(argv)
             return ""
@@ -357,7 +393,7 @@ class Lxd:
 
     def exec_passthrough(self, container: str, argv: list[str]) -> int:
         """Run a command in a container with the caller's stdio. Return its exit code."""
-        cmd = ["lxc", "exec", container, "--", *argv]
+        cmd = ["lxc", *self._project_args(), "exec", container, "--", *argv]
         if self.dry_run:
             self._log_dry(cmd)
             return 0
@@ -365,7 +401,7 @@ class Lxd:
 
     def exec_replace(self, container: str, argv: list[str]) -> None:
         """Replace this process with a command running in the container."""
-        cmd = ["lxc", "exec", container, "--", *argv]
+        cmd = ["lxc", *self._project_args(), "exec", container, "--", *argv]
         if self.dry_run:
             self._log_dry(cmd)
             return
@@ -374,7 +410,16 @@ class Lxd:
     def is_container_running(self, container: str) -> bool:
         """Check whether a container exists and is running (via `lxc ls`)."""
         result = subprocess.run(
-            ["lxc", "ls", "--columns", "s", "--format", "csv", container],
+            [
+                "lxc",
+                *self._project_args(),
+                "ls",
+                "--columns",
+                "s",
+                "--format",
+                "csv",
+                container,
+            ],
             text=True,
             capture_output=True,
         )
@@ -394,14 +439,46 @@ class Lxd:
         """
         network = f"{name}-net"
         log.info("[net] Creating LXD network %s", network)
-        result = self.run(["lxc", "network", "create", network], check=False)
+        result = self.run(
+            ["lxc", *self._project_args(), "network", "create", network], check=False
+        )
         if result.returncode != 0:
             log.info("  (network already exists, skipping)")
 
         log.info("[net] Disabling LXD-managed DHCP on %s", network)
-        self.run(["lxc", "network", "set", network, "ipv4.dhcp", "false"])
-        self.run(["lxc", "network", "set", network, "ipv6.dhcp", "false"])
-        self.run(["lxc", "network", "set", network, "ipv6.address", "none"])
+        self.run(
+            [
+                "lxc",
+                *self._project_args(),
+                "network",
+                "set",
+                network,
+                "ipv4.dhcp",
+                "false",
+            ]
+        )
+        self.run(
+            [
+                "lxc",
+                *self._project_args(),
+                "network",
+                "set",
+                network,
+                "ipv6.dhcp",
+                "false",
+            ]
+        )
+        self.run(
+            [
+                "lxc",
+                *self._project_args(),
+                "network",
+                "set",
+                network,
+                "ipv6.address",
+                "none",
+            ]
+        )
 
         gateway, prefixlen = self._network_subnet(network)
         log.info(
@@ -419,7 +496,9 @@ class Lxd:
             # No live network to query; return a representative subnet so the
             # rest of the dry-run (static IP assignment) has something to show.
             return "10.0.0.1", 24
-        result = self.run(["lxc", "network", "get", network, "ipv4.address"])
+        result = self.run(
+            ["lxc", *self._project_args(), "network", "get", network, "ipv4.address"]
+        )
         cidr = result.stdout.strip()
         if not cidr:
             log.error("could not read ipv4.address for network %s", network)
@@ -431,7 +510,9 @@ class Lxd:
         """Delete an LXD managed network."""
         network = f"{name}-net"
         log.info("[net] Deleting LXD network %s", network)
-        result = self.run(["lxc", "network", "delete", network], check=False)
+        result = self.run(
+            ["lxc", *self._project_args(), "network", "delete", network], check=False
+        )
         if result.returncode != 0:
             log.warning("  (network may not exist, skipping)")
 
@@ -457,11 +538,11 @@ class Lxd:
 
         for container in containers:
             log.info("[container] Starting %s", container)
-            self.run(["lxc", "start", container])
+            self.run(["lxc", *self._project_args(), "start", container])
 
     def _init_container(self, container: str, image: str, profile: str) -> None:
         log.info("[container] Initializing %s from %s", container, image)
-        cmd = ["lxc", "init", image, container]
+        cmd = ["lxc", *self._project_args(), "init", image, container]
         if self.dry_run:
             self._log_dry(cmd + ["<", profile])
             return
@@ -475,7 +556,15 @@ class Lxd:
     def _set_idmap(self, container: str) -> None:
         """Map the host user onto the container's ubuntu user for bind mounts."""
         idmap = f"uid {os.getuid()} {CONTAINER_UID}\ngid {os.getgid()} {CONTAINER_GID}\n"
-        cmd = ["lxc", "config", "set", container, "raw.idmap", "-"]
+        cmd = [
+            "lxc",
+            *self._project_args(),
+            "config",
+            "set",
+            container,
+            "raw.idmap",
+            "-",
+        ]
         if self.dry_run:
             self._log_dry(cmd)
             return
@@ -486,6 +575,7 @@ class Lxd:
         self.run(
             [
                 "lxc",
+                *self._project_args(),
                 "config",
                 "device",
                 "add",
@@ -506,7 +596,15 @@ class Lxd:
         ip = network.host_ip(index)
         log.info("[container] Assigning static IP %s/%d to %s", ip, network.prefixlen, container)
         config = self._render_network_config(ip, network.prefixlen, network.gateway)
-        cmd = ["lxc", "config", "set", container, "user.network-config", "-"]
+        cmd = [
+            "lxc",
+            *self._project_args(),
+            "config",
+            "set",
+            container,
+            "user.network-config",
+            "-",
+        ]
         if self.dry_run:
             self._log_dry(cmd)
             return
@@ -540,12 +638,17 @@ class Lxd:
         """Stop and delete LXD containers."""
         for container in containers:
             log.info("[container] Stopping %s", container)
-            result = self.run(["lxc", "stop", container, "--force"], check=False)
+            result = self.run(
+                ["lxc", *self._project_args(), "stop", container, "--force"],
+                check=False,
+            )
             if result.returncode != 0:
                 log.warning("  (container may not exist, skipping)")
         for container in containers:
             log.info("[container] Deleting %s", container)
-            result = self.run(["lxc", "delete", container], check=False)
+            result = self.run(
+                ["lxc", *self._project_args(), "delete", container], check=False
+            )
             if result.returncode != 0:
                 log.warning("  (container may not exist, skipping)")
 
@@ -697,6 +800,7 @@ class MaasEnv:
             log.error("ERROR: profile not found: %s", spec.profile)
             sys.exit(1)
 
+        self.lxd.ensure_project()
         network = self.lxd.create_network(spec.name)
         self.lxd.create_containers(
             containers, spec.ubuntu, str(profile_path), network
@@ -1440,6 +1544,8 @@ class CLI:
         container, *remote_cmd = shim_args
         return [
             "lxc",
+            "--project",
+            LXD_PROJECT,
             "exec",
             "--user",
             str(CONTAINER_UID),

@@ -122,6 +122,8 @@ class TestShimExecArgv(unittest.TestCase):
             maas_env.CLI._shim_exec_argv(["c1", "rsync", "--server", "x"]),
             [
                 "lxc",
+                "--project",
+                maas_env.LXD_PROJECT,
                 "exec",
                 "--user",
                 str(maas_env.CONTAINER_UID),
