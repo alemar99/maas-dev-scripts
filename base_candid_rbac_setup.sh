@@ -10,12 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default values
 MAAS_PW="maas"
 HOST_IP=$(hostname -I | cut -d" " -f1)
-CANDID_URL="http://$HOST_IP:8081"
-RBAC_URL="http://$HOST_IP:5000"
-
 # Candid + RBAC setup
-PGVER=$(ls -1 /etc/postgresql | tail -1)
-sudo dpkg -i $SCRIPT_DIR/rbac_stable.deb
+PGVER=$(find /etc/postgresql -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tail -1)
+sudo dpkg -i "$SCRIPT_DIR"/rbac_stable.deb
 
 # Update pg_hba.conf to allow candid/rbac access to maasdb
 hba_file="/etc/postgresql/$PGVER/main/pg_hba.conf"

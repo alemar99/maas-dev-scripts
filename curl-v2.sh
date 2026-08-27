@@ -9,7 +9,7 @@ IP=$(hostname -I | cut -d" " -f1)
 MAAS_URL="http://$IP:5240"
 
 APIKEY="${APIKEY:-$(sudo maas apikey --username maas)}"
-IFS=':' read -r CONSUMER_KEY TOKEN SIGNATURE <<< $APIKEY
+IFS=':' read -r CONSUMER_KEY TOKEN SIGNATURE <<< "$APIKEY"
 SIGNATURE="&${SIGNATURE}"
 
 ENDPOINT="$1"

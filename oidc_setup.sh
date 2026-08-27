@@ -6,7 +6,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source $SCRIPT_DIR/oidc_vars.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR"/oidc_vars.sh
 
 HOST_IP="$(hostname -I | cut -d' ' -f1)"
 

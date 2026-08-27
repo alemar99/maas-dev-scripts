@@ -6,4 +6,4 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source $SCRIPT_DIR/base_candid_rbac_setup.sh
+source "$SCRIPT_DIR"/base_candid_rbac_setup.sh

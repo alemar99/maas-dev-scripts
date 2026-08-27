@@ -10,7 +10,7 @@ if [[ -z "$file_path" || -z "$name" || -z "$title" ]]; then
 fi
 
 APIKEY="${APIKEY:-$(sudo maas apikey --username maas)}"
-IFS=':' read -r CONSUMER_KEY TOKEN SIGNATURE <<< $APIKEY
+IFS=':' read -r CONSUMER_KEY TOKEN SIGNATURE <<< "$APIKEY"
 SIGNATURE="&${SIGNATURE}"
 build_auth_header() {
   local nonce timestamp
@@ -47,7 +47,7 @@ tmp_dir=$(mktemp -d)
 split -b $CHUNK_SIZE "$file_path" "$tmp_dir/chunk_"
 
 for chunk in "$tmp_dir"/chunk_*; do
-  response=$(curl -X PUT http://localhost:5240$upload_uri \
+  response=$(curl -X PUT "http://localhost:5240$upload_uri" \
        -H "Content-Type: application/octet-stream" \
        -H "Content-Length: $(stat --format="%s" "$chunk")" \
        -H "$(build_auth_header)" \
