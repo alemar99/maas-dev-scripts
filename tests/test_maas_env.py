@@ -4,13 +4,14 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "maas-env.py"
 _spec = importlib.util.spec_from_file_location("maas_env", _MODULE_PATH)
-maas_env = importlib.util.module_from_spec(_spec)
+maas_env = importlib.util.module_from_spec(_spec)  # type: ignore
 # Register before executing: dataclasses resolves annotations via sys.modules.
 sys.modules["maas_env"] = maas_env
-_spec.loader.exec_module(maas_env)
+_spec.loader.exec_module(maas_env)  # type: ignore
 
 Mode = maas_env.Mode
 InstallType = maas_env.InstallType
@@ -254,7 +255,7 @@ class TestOverlayCommandBuilders(unittest.TestCase):
 
 
 class TestResolveScriptTargets(unittest.TestCase):
-    _MULTI = ["e-1", "e-2", "e-3"]
+    _MULTI: ClassVar = ["e-1", "e-2", "e-3"]
 
     def _resolve(self, target, containers):
         script = maas_env.ScriptTarget(path="s.sh", target=target)

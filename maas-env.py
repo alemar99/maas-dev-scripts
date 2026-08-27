@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import ClassVar, NamedTuple, Self
 
 try:
-    import argcomplete  # pip install argcomplete; eval "$(register-python-argcomplete maas-env.py)"
+    import argcomplete
+    # pip install argcomplete; eval "$(register-python-argcomplete maas-env.py)"
 except ImportError:
     argcomplete = None  # type: ignore[assignment]
 
@@ -105,9 +106,7 @@ class NetworkInfo(NamedTuple):
         Containers are placed at gateway-base + 10 + index (e.g. a /24 with
         gateway .1 yields .10, .11, .12), well clear of the gateway itself.
         """
-        network = ipaddress.ip_network(
-            f"{self.gateway}/{self.prefixlen}", strict=False
-        )
+        network = ipaddress.ip_network(f"{self.gateway}/{self.prefixlen}", strict=False)
         return str(network.network_address + 10 + index)
 
 
@@ -346,12 +345,17 @@ class Lxd:
         if result.returncode == 0:
             log.info("[project] Created LXD project %s", LXD_PROJECT)
         else:
-            if f"Project \"{LXD_PROJECT}\" already exists" in result.stderr:
+            if f'Project "{LXD_PROJECT}" already exists' in result.stderr:
                 log.info(
-                    "[project] LXD project %s already exists", LXD_PROJECT,
+                    "[project] LXD project %s already exists",
+                    LXD_PROJECT,
                 )
             else:
-                log.error("[project] Failed creating the LXD project %s. Stderr: %s", LXD_PROJECT, result.stderr)
+                log.error(
+                    "[project] Failed creating the LXD project %s. Stderr: %s",
+                    LXD_PROJECT,
+                    result.stderr,
+                )
                 sys.exit(1)
 
     def run(self, cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -360,7 +364,7 @@ class Lxd:
             self._log_dry(cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         log.info("  $ %s", " ".join(cmd))
-        result = subprocess.run(cmd, text=True, capture_output=True)
+        result = subprocess.run(cmd, text=True, capture_output=True, check=False)
         if check:
             self._fail_on_error(result)
         return result
@@ -374,7 +378,7 @@ class Lxd:
             self._log_dry(argv)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         log.info("  [%s] $ %s", container, cmd)
-        result = subprocess.run(argv, text=True, capture_output=True)
+        result = subprocess.run(argv, text=True, capture_output=True, check=False)
         if check:
             self._fail_on_error(result)
         if result.stdout.strip():
@@ -387,17 +391,20 @@ class Lxd:
         if self.dry_run:
             self._log_dry(argv)
             return ""
-        result = subprocess.run(argv, text=True, capture_output=True)
+        result = subprocess.run(argv, text=True, capture_output=True, check=False)
         self._fail_on_error(result)
         return result.stdout.strip()
 
     def exec_passthrough(self, container: str, argv: list[str]) -> int:
-        """Run a command in a container with the caller's stdio. Return its exit code."""
+        """Run a command in a container with the caller's stdio.
+
+        Return its exit code.
+        """
         cmd = ["lxc", *self._project_args(), "exec", container, "--", *argv]
         if self.dry_run:
             self._log_dry(cmd)
             return 0
-        return subprocess.run(cmd).returncode
+        return subprocess.run(cmd, check=False).returncode
 
     def exec_replace(self, container: str, argv: list[str]) -> None:
         """Replace this process with a command running in the container."""
@@ -422,6 +429,7 @@ class Lxd:
             ],
             text=True,
             capture_output=True,
+            check=False,
         )
         return result.returncode == 0 and result.stdout.strip() == "RUNNING"
 
@@ -549,13 +557,15 @@ class Lxd:
         log.info("  $ %s < %s", " ".join(cmd), profile)
         with open(profile, "rb") as profile_file:
             result = subprocess.run(
-                cmd, stdin=profile_file, text=True, capture_output=True
+                cmd, stdin=profile_file, text=True, capture_output=True, check=False
             )
         self._fail_on_error(result)
 
     def _set_idmap(self, container: str) -> None:
         """Map the host user onto the container's ubuntu user for bind mounts."""
-        idmap = f"uid {os.getuid()} {CONTAINER_UID}\ngid {os.getgid()} {CONTAINER_GID}\n"
+        idmap = (
+            f"uid {os.getuid()} {CONTAINER_UID}\ngid {os.getgid()} {CONTAINER_GID}\n"
+        )
         cmd = [
             "lxc",
             *self._project_args(),
@@ -568,7 +578,9 @@ class Lxd:
         if self.dry_run:
             self._log_dry(cmd)
             return
-        result = subprocess.run(cmd, input=idmap, text=True, capture_output=True)
+        result = subprocess.run(
+            cmd, input=idmap, text=True, capture_output=True, check=False
+        )
         self._fail_on_error(result)
 
     def _attach_network(self, container: str, network: str) -> None:
@@ -594,7 +606,12 @@ class Lxd:
         Must run before the container's first boot so cloud-init applies it.
         """
         ip = network.host_ip(index)
-        log.info("[container] Assigning static IP %s/%d to %s", ip, network.prefixlen, container)
+        log.info(
+            "[container] Assigning static IP %s/%d to %s",
+            ip,
+            network.prefixlen,
+            container,
+        )
         config = self._render_network_config(ip, network.prefixlen, network.gateway)
         cmd = [
             "lxc",
@@ -608,7 +625,9 @@ class Lxd:
         if self.dry_run:
             self._log_dry(cmd)
             return
-        result = subprocess.run(cmd, input=config, text=True, capture_output=True)
+        result = subprocess.run(
+            cmd, input=config, text=True, capture_output=True, check=False
+        )
         self._fail_on_error(result)
 
     @staticmethod
@@ -774,9 +793,7 @@ class MaasEnv:
                 continue
             for container in targets:
                 log.info("  [%s] running %s on %s", label, script.path, container)
-                result = self.lxd.exec(
-                    container, script.path, check=abort_on_failure
-                )
+                result = self.lxd.exec(container, script.path, check=abort_on_failure)
                 if result.returncode != 0:
                     log.warning(
                         "  [%s] WARNING: %s on %s failed (exit code %d)",
@@ -802,9 +819,7 @@ class MaasEnv:
 
         self.lxd.ensure_project()
         network = self.lxd.create_network(spec.name)
-        self.lxd.create_containers(
-            containers, spec.ubuntu, str(profile_path), network
-        )
+        self.lxd.create_containers(containers, spec.ubuntu, str(profile_path), network)
 
         self.registry.add(
             Env(
@@ -1069,7 +1084,9 @@ class CreateCommand(Command):
         installs = parser.add_subparsers(dest="install_type", metavar="INSTALL_TYPE")
         installs.required = True
 
-        p_snap = installs.add_parser(InstallType.SNAP, help="Install MAAS from the snap")
+        p_snap = installs.add_parser(
+            InstallType.SNAP, help="Install MAAS from the snap"
+        )
         self._add_create_args(p_snap)
         p_snap.add_argument(
             "--mode",
@@ -1280,7 +1297,7 @@ class OverlayCommand(Command):
     # newest numbered config is (currently 3.8) as new releases branch off.
     # overlay-config-master.yaml has no deb: section because MAAS dropped deb
     # packaging after 3.8 (snap-only from then on).
-    _CONFIG_BY_CHANNEL_PREFIX = {
+    _CONFIG_BY_CHANNEL_PREFIX: ClassVar = {
         "3.7": "overlay-config-37.yaml",
         "3.8": "overlay-config-38.yaml",
         "latest": "overlay-config-master.yaml",
@@ -1365,7 +1382,9 @@ class OverlayCommand(Command):
         return str(Path(__file__).resolve().parent)
 
     @staticmethod
-    def _map_into_repo(host_config: str, repo_root: str, mount: str = "/scripts") -> str:
+    def _map_into_repo(
+        host_config: str, repo_root: str, mount: str = "/scripts"
+    ) -> str:
         """Map a host overlay-config path to its path inside a container.
 
         The repo is bind-mounted at `mount` (default /scripts) in every
@@ -1400,7 +1419,7 @@ class LogsCommand(Command):
     help = "Tail MAAS service logs from a container"
 
     # The systemd unit that carries the MAAS logs, per install method.
-    _UNITS = {
+    _UNITS: ClassVar = {
         InstallType.SNAP: "snap.maas.supervisor",
         InstallType.DEB: "maas-regiond",
     }
