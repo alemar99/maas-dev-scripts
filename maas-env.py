@@ -796,11 +796,12 @@ class MaasEnv:
                 result = self.lxd.exec(container, script.path, check=abort_on_failure)
                 if result.returncode != 0:
                     log.warning(
-                        "  [%s] WARNING: %s on %s failed (exit code %d)",
+                        "  [%s] WARNING: %s on %s failed (exit code %d): (%s)",
                         label,
                         script.path,
                         container,
                         result.returncode,
+                        result.stderr,
                     )
 
     def create(self, spec: EnvironmentSpec, install: Install) -> None:
